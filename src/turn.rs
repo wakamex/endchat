@@ -151,7 +151,7 @@ fn turn_aop(engine: &Engine) -> crate::aop::Aop {
 }
 
 fn log(engine: &Engine, tx: &UnboundedSender<TurnEvent>, kind: Kind, text: &str, run: &str) -> Result<()> {
-    engine.mem().append(kind, text, Some(run))?;
+    engine.append(kind, text, Some(run))?;
     emit(
         tx,
         match kind {
@@ -203,7 +203,7 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, tx: &UnboundedSender<TurnEve
         let mut m = engine.mem();
         (m.chat_block()?, m.log.len())
     };
-    engine.mem().append(Kind::User, text, None)?;
+    engine.append(Kind::User, text, None)?;
     let prompt = format!("{view}<state>\ndate: {}\n</state>\n{text}", now_iso());
     let aop = turn_aop(engine);
     let cleanup = engine.cfg.turn.profile == "sealed";
@@ -249,7 +249,7 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, tx: &UnboundedSender<TurnEve
         }
         let queued: Vec<String> = engine.inbox.lock().expect("inbox lock poisoned").drain(..).collect();
         for q in queued {
-            engine.mem().append(Kind::User, &q, None)?;
+            engine.append(Kind::User, &q, None)?;
             next += &format!("The user sent this while you worked:\n{q}\n");
         }
         let file = write_prompt(engine, &next)?;
@@ -408,5 +408,25 @@ mod tests {
         pump.await.unwrap();
         let turn_prompt = fake.calls().into_iter().find(|c| c["cmd"] == "run" && !c["prompt"].as_str().unwrap().contains("Compaction:")).unwrap();
         assert!(!turn_prompt["prompt"].as_str().unwrap().contains("not summarized yet"));
+    }
+
+    #[tokio::test]
+    async fn messages_logged_during_a_turn_wake_the_workers_so_the_next_turn_can_go_on() {
+        let fake = FakeAop::new(json!({"compact": "ok", "turn_replies": ["zoom(0, 1)", "Read it.", "Second answer."]}));
+        let d = tempfile::tempdir().unwrap();
+        let e = engine(&fake, d.path());
+        e.mem().append(Kind::User, &"a long first message ".repeat(60), None).unwrap();
+        let pump = tokio::spawn(e.clone().pump());
+        let both = async {
+            // The first turn's tool result is long, so it needs a summary before the second turn.
+            for text in ["read the first message", "and now?"] {
+                let (tx, rx) = unbounded_channel();
+                say(e.clone(), text.into(), tx).await.unwrap();
+                collect(rx).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), both).await.expect("the second turn never started");
+        e.stop();
+        pump.await.unwrap();
     }
 }

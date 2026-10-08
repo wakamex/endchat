@@ -130,10 +130,6 @@ impl View {
         self.forced
     }
 
-    pub fn low(&self) -> usize {
-        self.low
-    }
-
     pub fn push(&mut self, l: u32, i: u64, sizes: &impl Sizes) {
         let bytes = line_bytes(l, i, sizes.text_size(l, i));
         self.total += bytes;

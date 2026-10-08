@@ -121,7 +121,6 @@ impl Config {
 
 /// An opened profile directory. Holds the exclusive lock until dropped.
 pub struct Profile {
-    pub dir: PathBuf,
     pub config: Config,
     _lock: File,
 }
@@ -141,7 +140,7 @@ impl Profile {
         let lock = OpenOptions::new().create(true).read(true).write(true).truncate(false).open(dir.join("lock"))?;
         flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|_| Error::Locked)?;
         let config = Config::load(dir)?;
-        Ok(Self { dir: dir.to_owned(), config, _lock: lock })
+        Ok(Self { config, _lock: lock })
     }
 }
 

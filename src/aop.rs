@@ -52,8 +52,6 @@ pub struct AopResult {
     pub model: Option<String>,
     #[serde(default)]
     pub error: Option<serde_json::Value>,
-    #[serde(default)]
-    pub accounting_status: Option<String>,
 }
 
 impl AopResult {

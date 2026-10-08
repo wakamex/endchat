@@ -4,6 +4,7 @@
 use crate::aop::Aop;
 use crate::compact::{Call, Compactor};
 use crate::error::Result;
+use crate::log::{Kind, Message};
 use crate::memory::{Limits, Memory};
 use crate::profile::Config;
 use crate::prompts;
@@ -76,7 +77,6 @@ impl Status {
 pub struct Engine {
     pub dir: PathBuf,
     pub cfg: Config,
-    pub aop: Aop,
     pub system_file: PathBuf,
     pub scratch: PathBuf,
     mem: Mutex<Memory>,
@@ -103,12 +103,11 @@ impl Engine {
         fs::write(&system_file, prompts::system(instructions.as_deref()))?;
         let mem = Memory::open(dir, &Limits::from(&cfg.limits), cfg.compactor.workers)?;
         let aop = Aop { bin: cfg.aop_bin.clone(), cwd: dir.to_owned() };
-        let compactor = Compactor::new(aop.clone(), cfg.compactor.clone(), system_file.clone(), scratch.clone());
+        let compactor = Compactor::new(aop, cfg.compactor.clone(), system_file.clone(), scratch.clone());
         let (changed, _) = watch::channel(0);
         Ok(Arc::new(Self {
             dir: dir.to_owned(),
             cfg,
-            aop,
             system_file,
             scratch,
             mem: Mutex::new(mem),
@@ -134,6 +133,13 @@ impl Engine {
     /// Wake the workers and anything waiting on summaries.
     pub fn changed(&self) {
         self.changed.send_modify(|v| *v += 1);
+    }
+
+    /// Log a message and wake the workers, which may have new summaries to build.
+    pub fn append(&self, kind: Kind, text: &str, run: Option<&str>) -> Result<Vec<Message>> {
+        let msgs = self.mem().append(kind, text, run)?;
+        self.changed();
+        Ok(msgs)
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {

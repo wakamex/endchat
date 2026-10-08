@@ -38,7 +38,6 @@ pub struct Memory {
 
 /// One compaction ready to send.
 pub struct Task {
-    pub job: Job,
     /// The whole prompt: the compaction view, then the task text.
     pub prompt: String,
     /// Bytes of the source the reply must be strictly smaller than.
@@ -170,7 +169,12 @@ impl Memory {
 
     /// Log a message, build its free leaf or queue its compaction, and extend the views.
     pub fn append(&mut self, kind: Kind, text: &str, run: Option<&str>) -> Result<Vec<Message>> {
+        let before = self.log.len().checked_sub(1);
         let msgs = self.log.append(kind, text, run)?;
+        if let Some(p) = before {
+            // A page run cut short by a crash is complete now that a later message exists.
+            self.sched.leaf_ready(p);
+        }
         for m in &msgs {
             let src = m.source();
             if src.len() <= NODE_BYTES {
@@ -255,7 +259,7 @@ impl Memory {
                 let prompt = format!(
                     "{head}Compaction: compress message {i} into one line of at most {NODE_BYTES} bytes\n(about 70 words), the length of this ruler:\n{ruler}\n<input>\n{source}\n</input>"
                 );
-                Ok(Task { job, prompt, source_bytes: source.len() })
+                Ok(Task { prompt, source_bytes: source.len() })
             }
             Job::Merge(l, i) => {
                 let (a, b) = (self.tree.get(l - 1, 2 * i)?, self.tree.get(l - 1, 2 * i + 1)?);
@@ -270,7 +274,7 @@ impl Memory {
                     flat(&a.text),
                     flat(&b.text)
                 );
-                Ok(Task { job, prompt, source_bytes: a.size + 1 + b.size })
+                Ok(Task { prompt, source_bytes: a.size + 1 + b.size })
             }
         }
     }
@@ -546,6 +550,23 @@ pub mod tests {
         let mut mem = Memory::open(d.path(), &limits(), 8).unwrap();
         let problems = mem.check().unwrap();
         assert!(problems.iter().any(|p| p.contains("torn line")), "{problems:?}");
+    }
+
+    #[test]
+    fn a_page_run_cut_short_waits_until_a_later_message_completes_it() {
+        let d = tempfile::tempdir().unwrap();
+        {
+            let mut store = crate::store::DayStore::open(&d.path().join("main")).unwrap();
+            let text = long(200);
+            let m = Message { i: 0, kind: Kind::User, size: text.len() + 6, text, date: crate::util::now_iso(), run: None, more: true };
+            store.append(crate::util::day_of(&m.date), &serde_json::to_string(&m).unwrap()).unwrap();
+        }
+        let mut mem = Memory::open(d.path(), &limits(), 8).unwrap();
+        assert_eq!(mem.sched.unbuilt_leaves(), 1);
+        assert_eq!(mem.sched.next(0), None, "the last page of a run is not summarized before its run is complete");
+        mem.append(Kind::Agent, "later", None).unwrap();
+        assert_eq!(mem.sched.next(0), Some(Job::Leaf(0)));
+        assert!(mem.check().unwrap().is_empty());
     }
 
     #[test]

@@ -115,10 +115,6 @@ impl Log {
         self.len
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     fn parse(line: &str) -> Option<Message> {
         serde_json::from_str(line).ok()
     }
