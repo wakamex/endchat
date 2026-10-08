@@ -1,6 +1,7 @@
 mod error;
 mod log;
 mod profile;
+mod sched;
 mod store;
 mod tree;
 mod util;
