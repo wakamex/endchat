@@ -141,7 +141,7 @@ impl Memory {
         Ok(())
     }
 
-    fn save_views(&self) -> Result<()> {
+    pub fn save_views(&self) -> Result<()> {
         let saved = SavedViews { len: self.log.len(), chat: self.chat.saved(), compaction: self.comp.saved() };
         let tmp = self.dir.join("view.json.tmp");
         {
@@ -319,6 +319,54 @@ impl Memory {
         Ok(self.log.get(id)?.date)
     }
 
+    /// Compare the log, the tree, and the views, and list every disagreement.
+    pub fn check(&mut self) -> Result<Vec<String>> {
+        let mut problems = Vec::new();
+        let report = self.log.check()?;
+        if report.torn_lines > 0 {
+            problems.push(format!("{} torn line(s) in the message log", report.torn_lines));
+        }
+        if report.index_mismatches > 0 || report.index_slots != report.messages {
+            problems.push(format!("main.idx disagrees with the log ({} mismatches, {} slots for {} messages)", report.index_mismatches, report.index_slots, report.messages));
+        }
+        if report.unterminated_page_run {
+            problems.push("the last message is a page run that was never finished".to_owned());
+        }
+        let len = self.log.len();
+        for n in self.tree.all()? {
+            let name = line_name(n.l, n.i);
+            if n.text.is_empty() || n.size != n.text.len() {
+                problems.push(format!("node {name} has a wrong size"));
+            }
+            if n.l == 0 && n.i >= len || n.l > 0 && (n.i + 1) << n.l > len {
+                problems.push(format!("node {name} covers messages the log does not have"));
+            }
+            if n.l > 0 && !(self.tree.is_built(n.l - 1, 2 * n.i) && self.tree.is_built(n.l - 1, 2 * n.i + 1)) {
+                problems.push(format!("node {name} is built but a half is not"));
+            }
+            if !self.tree.is_built(n.l, n.i) || self.tree.get(n.l, n.i)?.is_none() {
+                problems.push(format!("node {name} is in the tree log but not readable through tree.idx"));
+            }
+        }
+        for (name, view) in [("chat", &self.chat), ("compaction", &self.comp)] {
+            let mut at = 0;
+            for l in view.lines() {
+                if l.id() != at {
+                    problems.push(format!("the {name} view does not tile the log at message {at}"));
+                    break;
+                }
+                at = l.end();
+                if l.l > 0 && !self.tree.is_built(l.l, l.i) {
+                    problems.push(format!("the {name} view holds unbuilt line {}", line_name(l.l, l.i)));
+                }
+            }
+            if at != len {
+                problems.push(format!("the {name} view covers {at} messages, the log has {len}"));
+            }
+        }
+        Ok(problems)
+    }
+
     /// A waiting turn may go on when every earlier message is summarized or its leaf has failed 3 times.
     pub fn turn_may_proceed(&self, m: u64) -> bool {
         self.sched.unbuilt_before(m) == 0 || self.sched.leaves_before_all_failed(m, 3)
@@ -328,6 +376,7 @@ impl Memory {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use std::io::Write;
 
     pub fn limits() -> Limits {
         Limits { view_high: 4_000, view_low: 2_000, compaction_high: 1_500, compaction_low: 800 }
@@ -478,6 +527,25 @@ pub mod tests {
             at = l.end();
         }
         assert_eq!(at, 60);
+    }
+
+    #[test]
+    fn check_passes_on_a_healthy_profile_and_names_what_breaks() {
+        let d = tempfile::tempdir().unwrap();
+        let mut mem = Memory::open(d.path(), &limits(), 8).unwrap();
+        for i in 0..40 {
+            mem.append(Kind::User, &format!("message {i} {}", long(30)), None).unwrap();
+        }
+        while let Some(job) = mem.sched.next(0) {
+            stub_finish(&mut mem, job, 200);
+        }
+        assert_eq!(mem.check().unwrap(), Vec::<String>::new());
+        drop(mem);
+        let day = std::fs::read_dir(d.path().join("main")).unwrap().next().unwrap().unwrap().path();
+        std::fs::OpenOptions::new().append(true).open(day).unwrap().write_all(b"{\"i\":40,\"ki").unwrap();
+        let mut mem = Memory::open(d.path(), &limits(), 8).unwrap();
+        let problems = mem.check().unwrap();
+        assert!(problems.iter().any(|p| p.contains("torn line")), "{problems:?}");
     }
 
     #[test]
