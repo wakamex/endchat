@@ -1,0 +1,14 @@
+# systemd user unit: one endchat process per profile.
+#   cp contrib/endchat@.service ~/.config/systemd/user/
+#   systemctl --user enable --now endchat@main
+#   loginctl enable-linger "$USER"   # keep it running after logout
+[Unit]
+Description=endchat profile %i
+
+[Service]
+ExecStart=%h/.cargo/bin/endchat serve %i
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
