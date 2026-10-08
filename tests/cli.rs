@@ -35,11 +35,12 @@ fn status_zoom_and_check_open_an_idle_profile_directly() {
 }
 
 #[test]
-fn say_without_a_server_says_how_to_start_one() {
+fn say_without_a_server_runs_the_turn_itself_and_reports_aop_failures() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "aop_bin = \"/nonexistent/aop\"\n").unwrap();
     let o = endchat(&["say", dir.path().to_str().unwrap(), "hello"]);
     assert!(!o.status.success());
-    assert!(text(&o).contains("endchat serve"), "{}", text(&o));
+    assert!(text(&o).contains("cannot start /nonexistent/aop"), "{}", text(&o));
 }
 
 #[test]
@@ -49,4 +50,25 @@ fn sim_prints_its_report() {
     assert!(text(&o).contains("mean_rewritten_lines"), "{}", text(&o));
     let o = endchat(&["sim", "--compare-gist", "--messages", "4000"]);
     assert!(o.status.success() && text(&o).contains("batched between 64 KB and 128 KB"), "{}", text(&o));
+}
+
+#[test]
+fn import_loads_dated_history_and_summarizes_short_messages_for_free() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().to_str().unwrap();
+    let file = dir.path().join("history.json");
+    std::fs::write(
+        &file,
+        r#"[{"kind":"user","text":"I graduated in Business Administration","date":"2023-05-20T02:21:00Z"},
+            {"kind":"agent","text":"Congratulations!","date":"2023-05-20T02:22:00Z"},
+            {"kind":"user","text":"older note filed after","date":"2023-05-01T00:00:00Z"}]"#,
+    )
+    .unwrap();
+    let o = endchat(&["import", p, file.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", text(&o));
+    let report: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!((report["messages"].as_u64(), report["calls"].as_u64(), report["complete"].as_bool()), (Some(3), Some(0), Some(true)));
+    let o = endchat(&["zoom", p, "0", "1"]);
+    assert_eq!(text(&o), "user: I graduated in Business Administration");
+    assert!(text(&endchat(&["check", p])).starts_with("ok:"));
 }

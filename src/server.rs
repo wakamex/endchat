@@ -18,7 +18,7 @@ pub fn socket_path(profile: &Path) -> PathBuf {
 #[derive(Deserialize)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
 pub enum Request {
-    Say { text: String },
+    Say { text: String, #[serde(default)] date: Option<String> },
     Status,
     Zoom { id: u64, n: u64, #[serde(default)] offset: usize },
     Check,
@@ -38,9 +38,9 @@ fn event_json(e: &TurnEvent) -> Value {
 /// Answer one request, sending each reply line to `out`. Shared by the server and the local fallback.
 pub async fn handle(engine: &Arc<Engine>, req: Request, out: tokio::sync::mpsc::UnboundedSender<Value>) {
     match req {
-        Request::Say { text } => {
+        Request::Say { text, date } => {
             let (tx, mut rx) = unbounded_channel();
-            let turn = tokio::spawn(say(engine.clone(), text, tx));
+            let turn = tokio::spawn(say(engine.clone(), text, date, tx));
             while let Some(e) = rx.recv().await {
                 let _ = out.send(event_json(&e));
             }

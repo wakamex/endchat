@@ -85,6 +85,9 @@ pub struct Log {
     store: DayStore,
     idx: Idx,
     len: u64,
+    /// Day file of the newest message. Ids follow day order on recovery, so a message dated
+    /// earlier than its predecessor is filed under the predecessor's day.
+    last_day: u32,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -106,7 +109,7 @@ impl Log {
     pub fn open(profile: &Path) -> Result<Self> {
         let store = DayStore::open(&profile.join("main"))?;
         let idx = Idx::open(&profile.join("main.idx"))?;
-        let mut log = Self { store, idx, len: 0 };
+        let mut log = Self { store, idx, len: 0, last_day: 0 };
         log.recover()?;
         Ok(log)
     }
@@ -154,6 +157,7 @@ impl Log {
             }
             self.idx.set(self.len, rec)?;
             self.len += 1;
+            self.last_day = self.last_day.max(day);
         }
         Ok(true)
     }
@@ -161,6 +165,7 @@ impl Log {
     pub fn rebuild(&mut self) -> Result<()> {
         self.idx.clear()?;
         self.len = 0;
+        self.last_day = 0;
         for d in self.store.days()? {
             if !self.index_scan(d, 0)? {
                 return msg(format!("log ids are not dense at message {}", self.len));
@@ -215,9 +220,11 @@ impl Log {
                 run: run.map(str::to_owned),
                 more: n < last,
             };
-            let rec = self.store.append(day_of(date), &serde_json::to_string(&m)?)?;
+            let day = day_of(date).max(self.last_day);
+            let rec = self.store.append(day, &serde_json::to_string(&m)?)?;
             self.idx.set(m.i, rec)?;
             self.len += 1;
+            self.last_day = day;
             out.push(m);
         }
         Ok(out)
@@ -284,6 +291,18 @@ mod tests {
         drop(log);
         let mut log = open(d.path());
         assert_eq!(log.get(1).unwrap().text, "b");
+    }
+
+    #[test]
+    fn a_message_dated_before_its_predecessor_keeps_ids_in_day_order() {
+        let d = tempfile::tempdir().unwrap();
+        let mut log = open(d.path());
+        log.append_dated(Kind::User, "newer", None, "2026-10-08T00:00:00Z").unwrap();
+        log.append_dated(Kind::User, "older", None, "2026-10-01T00:00:00Z").unwrap();
+        drop(log);
+        fs::remove_file(d.path().join("main.idx")).unwrap();
+        let mut log = open(d.path());
+        assert_eq!((log.len(), log.get(1).unwrap().text.as_str(), log.get(1).unwrap().date.as_str()), (2, "older", "2026-10-01T00:00:00Z"));
     }
 
     #[test]

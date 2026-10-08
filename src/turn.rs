@@ -82,7 +82,7 @@ fn emit(tx: &UnboundedSender<TurnEvent>, e: TurnEvent) {
 
 /// Accept a user message. If a turn is running it is queued for that turn; otherwise a turn
 /// starts, followed by one for each message queued while it ran.
-pub async fn say(engine: Arc<Engine>, text: String, tx: UnboundedSender<TurnEvent>) -> Result<()> {
+pub async fn say(engine: Arc<Engine>, text: String, date: Option<String>, tx: UnboundedSender<TurnEvent>) -> Result<()> {
     if engine.turn_running.swap(true, Ordering::SeqCst) {
         engine.inbox.lock().expect("inbox lock poisoned").push_back(text);
         emit(&tx, TurnEvent::Queued);
@@ -92,7 +92,7 @@ pub async fn say(engine: Arc<Engine>, text: String, tx: UnboundedSender<TurnEven
     let mut next = Some(text);
     let mut outcome = Ok(());
     while let Some(m) = next.take() {
-        if let Err(e) = run_turn(&engine, &m, &tx).await {
+        if let Err(e) = run_turn(&engine, &m, date.as_deref(), &tx).await {
             engine.set_error(format!("turn failed: {e}"));
             emit(&tx, TurnEvent::Error(e.to_string()));
             outcome = Err(e);
@@ -197,14 +197,14 @@ fn answer(engine: &Engine, call: &ToolCall) -> String {
     r.unwrap_or_else(|e| format!("error: {e}"))
 }
 
-async fn run_turn(engine: &Arc<Engine>, text: &str, tx: &UnboundedSender<TurnEvent>) -> Result<()> {
+async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &UnboundedSender<TurnEvent>) -> Result<()> {
     wait_for_summaries(engine).await;
     let (view, index) = {
         let mut m = engine.mem();
         (m.chat_block()?, m.log.len())
     };
     engine.append(Kind::User, text, None)?;
-    let prompt = format!("{view}<state>\ndate: {}\n</state>\n{text}", now_iso());
+    let prompt = format!("{view}<state>\ndate: {}\n</state>\n{text}", date.map_or_else(now_iso, str::to_owned));
     let aop = turn_aop(engine);
     let cleanup = engine.cfg.turn.profile == "sealed";
     let mut runs: Vec<String> = Vec::new();
@@ -310,7 +310,7 @@ mod tests {
         e.mem().append(Kind::User, "hello", None).unwrap();
         e.mem().append(Kind::Agent, "hi there", None).unwrap();
         let (tx, rx) = unbounded_channel();
-        say(e.clone(), "what did I say first?".into(), tx).await.unwrap();
+        say(e.clone(), "what did I say first?".into(), None, tx).await.unwrap();
         let events = collect(rx).await;
         assert_eq!(
             events,
@@ -347,11 +347,11 @@ mod tests {
         e.mem().append(Kind::User, "start", None).unwrap();
         e.turn_running.store(true, Ordering::SeqCst); // a turn is in progress
         let (tx, rx) = unbounded_channel();
-        say(e.clone(), "wait, also this".into(), tx).await.unwrap();
+        say(e.clone(), "wait, also this".into(), None, tx).await.unwrap();
         assert_eq!(collect(rx).await, [TurnEvent::Queued, TurnEvent::Done]);
         e.turn_running.store(false, Ordering::SeqCst);
         let (tx, rx) = unbounded_channel();
-        say(e.clone(), "go".into(), tx).await.unwrap();
+        say(e.clone(), "go".into(), None, tx).await.unwrap();
         let events = collect(rx).await;
         // The queued message arrives with the date result, and is logged as a user message.
         let calls = fake.calls();
@@ -369,7 +369,7 @@ mod tests {
         let e = engine(&fake, d.path());
         e.inbox.lock().unwrap().push_back("and another thing".into());
         let (tx, rx) = unbounded_channel();
-        say(e.clone(), "one".into(), tx).await.unwrap();
+        say(e.clone(), "one".into(), None, tx).await.unwrap();
         let events = collect(rx).await;
         assert_eq!(events.iter().filter(|x| matches!(x, TurnEvent::Agent(_))).count(), 2);
         let runs: Vec<_> = fake.calls().into_iter().filter(|c| c["cmd"] == "run").collect();
@@ -384,12 +384,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let e = engine(&fake, d.path());
         let (tx, rx) = unbounded_channel();
-        assert!(say(e.clone(), "hi".into(), tx).await.is_err());
+        assert!(say(e.clone(), "hi".into(), None, tx).await.is_err());
         let events = collect(rx).await;
         assert!(matches!(events[0], TurnEvent::Error(_)));
         assert!(!e.turn_running.load(Ordering::SeqCst));
         let (tx, rx) = unbounded_channel();
-        say(e.clone(), "again".into(), tx).await.unwrap();
+        say(e.clone(), "again".into(), None, tx).await.unwrap();
         assert!(collect(rx).await.contains(&TurnEvent::Agent("fine".into())));
     }
 
@@ -402,7 +402,7 @@ mod tests {
         let pump = tokio::spawn(e.clone().pump());
         e.changed();
         let (tx, rx) = unbounded_channel();
-        say(e.clone(), "now?".into(), tx).await.unwrap();
+        say(e.clone(), "now?".into(), None, tx).await.unwrap();
         assert!(collect(rx).await.contains(&TurnEvent::Agent("done".into())));
         e.stop();
         pump.await.unwrap();
@@ -421,7 +421,7 @@ mod tests {
             // The first turn's tool result is long, so it needs a summary before the second turn.
             for text in ["read the first message", "and now?"] {
                 let (tx, rx) = unbounded_channel();
-                say(e.clone(), text.into(), tx).await.unwrap();
+                say(e.clone(), text.into(), None, tx).await.unwrap();
                 collect(rx).await;
             }
         };

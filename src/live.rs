@@ -91,7 +91,7 @@ async fn live_recall() {
     let mut right = 0;
     for f in &facts {
         let (tx, mut rx) = unbounded_channel();
-        say(engine.clone(), f.2.to_owned(), tx).await.unwrap();
+        say(engine.clone(), f.2.to_owned(), None, tx).await.unwrap();
         let mut reply = String::new();
         let mut zooms = 0;
         while let Some(e) = rx.recv().await {

@@ -44,10 +44,22 @@ enum Command {
         /// Profile name under ~/.endchat, or a directory path
         profile: String,
     },
-    /// Send a message and print the reply
+    /// Load a history file into a profile and wait until it is fully summarized
+    Import {
+        profile: String,
+        /// JSON array of {"kind": "user"|"agent"|"note", "text": ..., "date": "2026-10-08T12:00:00Z"}
+        file: PathBuf,
+        /// Give up waiting for summaries after this many seconds
+        #[arg(long, default_value_t = 21_600)]
+        timeout_secs: u64,
+    },
+    /// Send a message and print the reply (runs the turn itself when no server is running)
     Say {
         profile: String,
         text: Vec<String>,
+        /// The date the model is told it is, instead of now
+        #[arg(long)]
+        date: Option<String>,
         /// Also print tool calls and their results to stderr
         #[arg(short, long)]
         verbose: bool,
@@ -119,14 +131,15 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let (_, engine) = open_engine(&profile)?;
             server::serve(engine).await?;
         }
-        Command::Say { profile, text, verbose } => {
+        Command::Import { profile, file, timeout_secs } => return import(&profile, &file, timeout_secs).await,
+        Command::Say { profile, text, date, verbose } => {
             let text = text.join(" ");
             if text.trim().is_empty() {
                 return Err(Error::Msg("nothing to say".into()));
             }
             let dir = Profile::locate(&profile)?;
             let mut failed = false;
-            let ran = server::ask(&dir, &json!({"cmd": "say", "text": text}), |v| {
+            let mut on_line = |v: Value| {
                 let t = v["text"].as_str().unwrap_or("");
                 match v["event"].as_str() {
                     Some("agent") => println!("{t}"),
@@ -139,10 +152,21 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     }
                     _ => {}
                 }
-            })
-            .await?;
-            if !ran {
-                return Err(Error::Msg(format!("no server for {profile}: run `endchat serve {profile}`")));
+            };
+            let req = json!({"cmd": "say", "text": text, "date": date});
+            if !server::ask(&dir, &req, &mut on_line).await? {
+                // No server: run the turn here, with compaction workers for what the turn logs.
+                let (_, engine) = open_engine(&profile)?;
+                let pump = tokio::spawn(engine.clone().pump());
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let request: server::Request = serde_json::from_value(req).map_err(Error::from)?;
+                server::handle(&engine, request, tx).await;
+                while let Ok(v) = rx.try_recv() {
+                    on_line(v);
+                }
+                engine.stop();
+                let _ = pump.await;
+                engine.mem().save_views()?;
             }
             return Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS });
         }
@@ -170,6 +194,45 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[derive(serde::Deserialize)]
+struct Imported {
+    kind: log::Kind,
+    text: String,
+    date: String,
+}
+
+/// Append a history file, let the workers summarize it, and report what that cost.
+async fn import(profile: &str, file: &std::path::Path, timeout_secs: u64) -> Result<ExitCode> {
+    let items: Vec<Imported> = serde_json::from_str(&std::fs::read_to_string(file)?).map_err(Error::from)?;
+    let (_, engine) = open_engine(profile)?;
+    let started = std::time::Instant::now();
+    let before = engine.ledger().len();
+    let pump = tokio::spawn(engine.clone().pump());
+    for m in &items {
+        engine.mem().append_dated(m.kind, &m.text, None, &m.date)?;
+    }
+    engine.changed();
+    let done = engine.wait_idle(std::time::Duration::from_secs(timeout_secs)).await;
+    engine.stop();
+    let _ = pump.await;
+    engine.mem().save_views()?;
+    let calls: Vec<_> = engine.ledger().into_iter().skip(before).collect();
+    let sum = |f: fn(&tree::Usage) -> u64| calls.iter().filter_map(|c| c.usage.as_ref()).map(f).sum::<u64>();
+    let report = json!({
+        "complete": done,
+        "messages": engine.mem().log.len(),
+        "calls": calls.len(),
+        "failed_calls": calls.iter().filter(|c| !c.ok).count(),
+        "input_tokens": sum(|u| u.input_tokens),
+        "cached_input_tokens": sum(|u| u.cached_input_tokens),
+        "output_tokens": sum(|u| u.output_tokens),
+        "seconds": started.elapsed().as_secs(),
+        "last_error": engine.status().last_error,
+    });
+    println!("{report}");
+    Ok(if done { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 fn print_reply(lines: Vec<Value>) -> ExitCode {

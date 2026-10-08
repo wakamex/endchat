@@ -169,8 +169,13 @@ impl Memory {
 
     /// Log a message, build its free leaf or queue its compaction, and extend the views.
     pub fn append(&mut self, kind: Kind, text: &str, run: Option<&str>) -> Result<Vec<Message>> {
+        self.append_dated(kind, text, run, &crate::util::now_iso())
+    }
+
+    /// Like `append`, with the message's own date (for imported history).
+    pub fn append_dated(&mut self, kind: Kind, text: &str, run: Option<&str>, date: &str) -> Result<Vec<Message>> {
         let before = self.log.len().checked_sub(1);
-        let msgs = self.log.append(kind, text, run)?;
+        let msgs = self.log.append_dated(kind, text, run, date)?;
         if let Some(p) = before {
             // A page run cut short by a crash is complete now that a later message exists.
             self.sched.leaf_ready(p);
