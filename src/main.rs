@@ -1,5 +1,6 @@
 mod error;
 mod log;
+mod memory;
 mod profile;
 mod sched;
 mod store;

@@ -3,7 +3,9 @@
 use crate::error::{Error, Result, msg};
 use crate::store::{DayStore, Idx, Rec};
 use crate::util::{day_of, now_iso};
+use crate::view::Sizes;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -64,13 +66,14 @@ pub struct Tree {
     store: DayStore,
     idx: Idx,
     built: Vec<bool>,
+    sizes: RefCell<HashMap<u64, usize>>,
 }
 
 impl Tree {
     pub fn open(profile: &Path) -> Result<Self> {
         let store = DayStore::open(&profile.join("tree"))?;
         let idx = Idx::open(&profile.join("tree.idx"))?;
-        let mut t = Self { store, idx, built: Vec::new() };
+        let mut t = Self { store, idx, built: Vec::new(), sizes: RefCell::new(HashMap::new()) };
         t.load()?;
         Ok(t)
     }
@@ -150,10 +153,6 @@ impl Tree {
         }
     }
 
-    pub fn text_size(&mut self, l: u32, i: u64) -> Result<Option<usize>> {
-        Ok(self.get(l, i)?.map(|n| n.size))
-    }
-
     /// Write a node, once. A second node for the same slot is an error.
     pub fn put(&mut self, node: &Node) -> Result<()> {
         if node.text.is_empty() {
@@ -166,6 +165,7 @@ impl Tree {
         let s = slot(node.l, node.i);
         self.idx.set(s, rec)?;
         self.mark(s);
+        self.sizes.borrow_mut().insert(s, node.size);
         Ok(())
     }
 
@@ -182,8 +182,28 @@ impl Tree {
         Ok(out)
     }
 
+    /// Size of a built node's text, read without repairing the index.
+    fn peek_size(&self, l: u32, i: u64) -> Option<usize> {
+        if !self.is_built(l, i) {
+            return None;
+        }
+        let s = slot(l, i);
+        if let Some(&n) = self.sizes.borrow().get(&s) {
+            return Some(n);
+        }
+        let n = self.read(self.idx.get(s).ok()??, l, i)?.size;
+        self.sizes.borrow_mut().insert(s, n);
+        Some(n)
+    }
+
     pub fn built_count(&self) -> usize {
         self.built.iter().filter(|b| **b).count()
+    }
+}
+
+impl Sizes for Tree {
+    fn text_size(&self, l: u32, i: u64) -> Option<usize> {
+        self.peek_size(l, i)
     }
 }
 
