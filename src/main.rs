@@ -1,5 +1,6 @@
 mod aop;
 mod compact;
+mod engine;
 mod error;
 mod events;
 mod log;

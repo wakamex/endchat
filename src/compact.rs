@@ -7,6 +7,7 @@ use crate::tree::{NODE_BYTES, Usage};
 use crate::util::cut_bytes;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::oneshot;
 
 pub const MAX_ATTEMPTS: usize = 5;
 
@@ -119,22 +120,42 @@ impl Compactor {
     /// Build one node's text. `prompt` is the whole first prompt; `source_bytes` is the size the
     /// reply must be strictly under.
     pub async fn build(&self, prompt: &str, source_bytes: usize) -> Compaction {
+        self.build_signalling(prompt, source_bytes, None).await
+    }
+
+    /// Like `build`, and sends on `first_reply` once the first call has answered, so callers can
+    /// hold other calls on the same cold prefix until it is cached.
+    pub async fn build_signalling(&self, prompt: &str, source_bytes: usize, mut first_reply: Option<oneshot::Sender<()>>) -> Compaction {
         let mut calls = Vec::new();
         let mut runs = Vec::new();
-        let result = self.attempts(prompt, source_bytes, &mut calls, &mut runs).await;
+        let result = self.attempts(prompt, source_bytes, &mut calls, &mut runs, &mut first_reply).await;
+        if let Some(tx) = first_reply.take() {
+            let _ = tx.send(());
+        }
         for id in &runs {
             self.aop.cleanup(id).await;
         }
         Compaction { result, calls }
     }
 
-    async fn attempts(&self, prompt: &str, source_bytes: usize, calls: &mut Vec<Call>, runs: &mut Vec<String>) -> std::result::Result<Built, String> {
+    async fn attempts(
+        &self,
+        prompt: &str,
+        source_bytes: usize,
+        calls: &mut Vec<Call>,
+        runs: &mut Vec<String>,
+        first_reply: &mut Option<oneshot::Sender<()>>,
+    ) -> std::result::Result<Built, String> {
         let mut usage = Usage::default();
         let mut best: Option<(String, String, Option<String>)> = None;
         let mut text = prompt.to_owned();
         let mut last_run: Option<String> = None;
         for attempt in 1..=MAX_ATTEMPTS {
-            let r = self.call(last_run.as_deref(), &text).await.map_err(|e: Error| e.to_string())?;
+            let r = self.call(last_run.as_deref(), &text).await;
+            if let Some(tx) = first_reply.take() {
+                let _ = tx.send(());
+            }
+            let r = r.map_err(|e: Error| e.to_string())?;
             runs.push(r.run_id.clone());
             calls.push(Call::of(&r));
             if let Some(u) = &r.usage {

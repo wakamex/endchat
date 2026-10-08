@@ -5,7 +5,7 @@ It checks every `run` invocation against the real `aop run --dry-run` when the r
 installed (so an invalid flag or model fails here exactly as it would for real), then answers from a
 scenario file instead of calling a model. State lives in $FAKE_AOP_DIR.
 """
-import json, os, shutil, subprocess, sys
+import fcntl, json, os, shutil, subprocess, sys
 
 D = os.environ["FAKE_AOP_DIR"]
 KNOWN_RUN = {"--agent", "--model", "--effort", "--profile", "--tools", "--system-prompt-file", "--prompt-file", "--timeout"}
@@ -119,6 +119,8 @@ def finish(run_id, reply, prompt, scenario, ok=True):
 
 def main():
     cmd, argv = sys.argv[1], sys.argv[2:]
+    lock = open(os.path.join(D, "lock"), "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)  # callers run in parallel; the state files are shared
     scenario = load("scenario.json", {})
     chains = load("chains.json", {})
     if cmd == "run":
