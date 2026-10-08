@@ -167,6 +167,25 @@ impl Idx {
         Ok(())
     }
 
+    pub fn read_all(&self) -> Result<Vec<Option<Rec>>> {
+        let data = {
+            let mut v = vec![0u8; self.file.metadata()?.len() as usize];
+            self.file.read_exact_at(&mut v, 0)?;
+            v
+        };
+        Ok(data
+            .chunks_exact(RECORD as usize)
+            .map(|b| {
+                let len = u32::from_le_bytes(b[8..12].try_into().expect("4 bytes"));
+                (len != 0).then(|| Rec {
+                    off: u64::from_le_bytes(b[..8].try_into().expect("8 bytes")),
+                    len,
+                    day: u32::from_le_bytes(b[12..].try_into().expect("4 bytes")),
+                })
+            })
+            .collect())
+    }
+
     pub fn clear(&self) -> Result<()> {
         self.file.set_len(0)?;
         Ok(())
