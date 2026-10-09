@@ -103,6 +103,9 @@ enum Command {
         /// Replay an `import` history file instead of a synthetic chat (uses --pace)
         #[arg(long)]
         history: Option<PathBuf>,
+        /// With --history: replay at the messages' own timestamps with a 1-hour cache lifetime
+        #[arg(long)]
+        real_time: bool,
         /// With --history: messages appended at a time before waiting for summaries; 0 is all at once
         #[arg(long, default_value_t = 0)]
         pace: usize,
@@ -183,13 +186,19 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Status { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "status"})).await?)),
         Command::Zoom { profile, id, n, offset } => return Ok(print_reply(query(&profile, json!({"cmd": "zoom", "id": id, "n": n, "offset": offset})).await?)),
         Command::Check { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "check"})).await?)),
-        Command::Sim { messages, interval_secs, latency_secs, every_message_lines, no_prime, compare_gist, history, pace } => {
+        Command::Sim { messages, interval_secs, latency_secs, every_message_lines, no_prime, compare_gist, history, real_time, pace } => {
             if let Some(file) = history {
                 let items: Vec<Imported> = serde_json::from_str(&std::fs::read_to_string(file)?).map_err(Error::from)?;
-                let history: Vec<_> = items.into_iter().map(|m| (m.kind, m.text)).collect();
                 let dir = tempfile::tempdir_in(std::env::temp_dir())?;
-                let cfg = sim::SimConfig { latency_ms: latency_secs * 1000, prime_first: !no_prime, real_tails: true, ..Default::default() };
-                println!("{:#?}", sim::run_import(dir.path(), &history, pace, &cfg)?);
+                let mut cfg = sim::SimConfig { latency_ms: latency_secs * 1000, prime_first: !no_prime, real_tails: true, ..Default::default() };
+                if real_time {
+                    cfg.ttl_ms = 3_600_000;
+                    let history: Vec<_> = items.into_iter().map(|m| (m.kind, m.text, util::unix_from_iso(&m.date).unwrap_or(0))).collect();
+                    println!("{:#?}", sim::run_real_time(dir.path(), &history, &cfg)?);
+                } else {
+                    let history: Vec<_> = items.into_iter().map(|m| (m.kind, m.text)).collect();
+                    println!("{:#?}", sim::run_import(dir.path(), &history, pace, &cfg)?);
+                }
             } else if compare_gist {
                 let (every, batched, lines) = sim::compare_gist(messages, every_message_lines.unwrap_or(192));
                 println!("view lines rewritten per message, over the second half of {messages} messages");

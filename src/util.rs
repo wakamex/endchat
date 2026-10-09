@@ -33,6 +33,18 @@ pub fn day_of(iso: &str) -> u32 {
     iso.get(..10).map_or(0, |d| d.replace('-', "").parse().unwrap_or(0))
 }
 
+/// Unix seconds of an ISO timestamp like `2026-10-08T12:30:00Z`.
+pub fn unix_from_iso(iso: &str) -> Option<i64> {
+    let n = |r: std::ops::Range<usize>| iso.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Some(days * 86_400 + n(11..13)? * 3600 + n(14..16)? * 60 + iso.get(17..19).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0))
+}
+
 /// The longest prefix of `s` that is at most `max` bytes and ends on a character boundary.
 pub fn cut_bytes(s: &str, max: usize) -> &str {
     let mut end = max.min(s.len());
@@ -51,6 +63,9 @@ mod tests {
         assert_eq!(iso_from_unix(0), "1970-01-01T00:00:00Z");
         assert_eq!(iso_from_unix(1_791_500_000), "2026-10-08T22:53:20Z");
         assert_eq!(day_of("2026-10-08T22:53:20Z"), 20_261_008);
+        for s in [0, 951_782_400, 1_791_500_000, 4_102_444_799] {
+            assert_eq!(unix_from_iso(&iso_from_unix(s)), Some(s));
+        }
     }
 
     #[test]

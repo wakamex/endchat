@@ -271,6 +271,55 @@ pub struct ImportReport {
     pub seconds: u64,
 }
 
+/// Replay a history at its own timestamps: each message arrives when it was sent, compactions run
+/// in the background between messages, and cache entries expire after `cfg.ttl_ms`.
+pub fn run_real_time(dir: &Path, history: &[(Kind, String, i64)], cfg: &SimConfig) -> Result<ImportReport> {
+    let (high, low, chigh, clow) = cfg.limits;
+    let limits = Limits { view_high: high, view_low: low, compaction_high: chigh, compaction_low: clow };
+    let mut mem = Memory::open(dir, &limits, cfg.workers)?;
+    let mut rng = Rng(cfg.seed);
+    let mut cache = Cache { ttl: cfg.ttl_ms, entries: HashMap::new(), pending: BinaryHeap::new() };
+    let mut flights: Vec<Flight> = Vec::new();
+    let mut stats = (0usize, 0usize, 0u64);
+    let mut now = 0u64;
+    let origin = history.first().map_or(0, |h| h.2);
+    for (n, (kind, text, ts)) in history.iter().enumerate() {
+        let arrives = ((ts - origin).max(0) as u64) * 1000;
+        loop {
+            flights.sort_by_key(|f| Reverse(f.done));
+            match flights.last() {
+                Some(f) if f.done <= arrives => {
+                    let f = flights.pop().expect("peeked");
+                    now = f.done;
+                    let (l, i) = match f.job {
+                        Job::Leaf(i) => (0, i),
+                        Job::Merge(l, i) => (l, i),
+                    };
+                    mem.finish(crate::tree::Node::new(l, i, "s".repeat(f.bytes)), f.job)?;
+                    start_burst(&mut mem, &mut cache, &mut flights, &mut rng, now, cfg, &mut stats);
+                }
+                _ => break,
+            }
+        }
+        now = now.max(arrives);
+        mem.append(*kind, text, None)?;
+        mem.sched.kick();
+        start_burst(&mut mem, &mut cache, &mut flights, &mut rng, now, cfg, &mut stats);
+        let _ = n;
+    }
+    while let Some(f) = flights.pop() {
+        now = now.max(f.done);
+        let (l, i) = match f.job {
+            Job::Leaf(i) => (0, i),
+            Job::Merge(l, i) => (l, i),
+        };
+        mem.finish(crate::tree::Node::new(l, i, "s".repeat(f.bytes)), f.job)?;
+        start_burst(&mut mem, &mut cache, &mut flights, &mut rng, now, cfg, &mut stats);
+        flights.sort_by_key(|f| Reverse(f.done));
+    }
+    Ok(ImportReport { calls: stats.2, input_bytes: stats.1, cached_bytes: stats.0, cached_share: stats.0 as f64 / stats.1.max(1) as f64, seconds: now / 1000 })
+}
+
 /// Replay a real history the way `endchat import --pace N` does: append `pace` messages (all of
 /// them when 0), wait until everything is summarized, append the next batch.
 pub fn run_import(dir: &Path, history: &[(Kind, String)], pace: usize, cfg: &SimConfig) -> Result<ImportReport> {
