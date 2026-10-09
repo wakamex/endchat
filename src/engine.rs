@@ -164,7 +164,8 @@ impl Engine {
         for c in calls {
             let e = LedgerEntry { date: now_iso(), kind: kind.into(), run: c.run_id.clone(), model: c.model.clone(), usage: c.usage, ok: c.ok };
             if let Ok(line) = serde_json::to_string(&e) {
-                let _ = writeln!(f, "{line}");
+                // One write per entry: concurrent workers append to the same file.
+                let _ = f.write_all(format!("{line}\n").as_bytes());
             }
         }
         let _ = f.sync_data();
