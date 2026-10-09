@@ -52,6 +52,10 @@ enum Command {
         /// Give up waiting for summaries after this many seconds
         #[arg(long, default_value_t = 21_600)]
         timeout_secs: u64,
+        /// Append this many messages at a time and wait for their summaries before the next batch,
+        /// as a live chat would; 0 appends everything at once
+        #[arg(long, default_value_t = 0)]
+        pace: usize,
     },
     /// Send a message and print the reply (runs the turn itself when no server is running)
     Say {
@@ -96,6 +100,12 @@ enum Command {
         /// Compare merge timing on the view alone, as the gist does, over --messages messages
         #[arg(long)]
         compare_gist: bool,
+        /// Replay an `import` history file instead of a synthetic chat (uses --pace)
+        #[arg(long)]
+        history: Option<PathBuf>,
+        /// With --history: messages appended at a time before waiting for summaries; 0 is all at once
+        #[arg(long, default_value_t = 0)]
+        pace: usize,
     },
 }
 
@@ -131,7 +141,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let (_, engine) = open_engine(&profile)?;
             server::serve(engine).await?;
         }
-        Command::Import { profile, file, timeout_secs } => return import(&profile, &file, timeout_secs).await,
+        Command::Import { profile, file, timeout_secs, pace } => return import(&profile, &file, timeout_secs, pace).await,
         Command::Say { profile, text, date, verbose } => {
             let text = text.join(" ");
             if text.trim().is_empty() {
@@ -173,8 +183,14 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Status { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "status"})).await?)),
         Command::Zoom { profile, id, n, offset } => return Ok(print_reply(query(&profile, json!({"cmd": "zoom", "id": id, "n": n, "offset": offset})).await?)),
         Command::Check { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "check"})).await?)),
-        Command::Sim { messages, interval_secs, latency_secs, every_message_lines, no_prime, compare_gist } => {
-            if compare_gist {
+        Command::Sim { messages, interval_secs, latency_secs, every_message_lines, no_prime, compare_gist, history, pace } => {
+            if let Some(file) = history {
+                let items: Vec<Imported> = serde_json::from_str(&std::fs::read_to_string(file)?).map_err(Error::from)?;
+                let history: Vec<_> = items.into_iter().map(|m| (m.kind, m.text)).collect();
+                let dir = tempfile::tempdir_in(std::env::temp_dir())?;
+                let cfg = sim::SimConfig { latency_ms: latency_secs * 1000, prime_first: !no_prime, real_tails: true, ..Default::default() };
+                println!("{:#?}", sim::run_import(dir.path(), &history, pace, &cfg)?);
+            } else if compare_gist {
                 let (every, batched, lines) = sim::compare_gist(messages, every_message_lines.unwrap_or(192));
                 println!("view lines rewritten per message, over the second half of {messages} messages");
                 println!("merged to {} lines after every message: {every:.1}", every_message_lines.unwrap_or(192));
@@ -204,17 +220,24 @@ struct Imported {
 }
 
 /// Append a history file, let the workers summarize it, and report what that cost.
-async fn import(profile: &str, file: &std::path::Path, timeout_secs: u64) -> Result<ExitCode> {
+async fn import(profile: &str, file: &std::path::Path, timeout_secs: u64, pace: usize) -> Result<ExitCode> {
     let items: Vec<Imported> = serde_json::from_str(&std::fs::read_to_string(file)?).map_err(Error::from)?;
     let (_, engine) = open_engine(profile)?;
     let started = std::time::Instant::now();
     let before = engine.ledger().len();
     let pump = tokio::spawn(engine.clone().pump());
-    for m in &items {
-        engine.mem().append_dated(m.kind, &m.text, None, &m.date)?;
+    let limit = std::time::Duration::from_secs(timeout_secs);
+    let mut done = true;
+    for batch in items.chunks(if pace == 0 { items.len().max(1) } else { pace }) {
+        for m in batch {
+            engine.mem().append_dated(m.kind, &m.text, None, &m.date)?;
+        }
+        engine.changed();
+        if pace > 0 {
+            done &= engine.wait_idle(limit).await;
+        }
     }
-    engine.changed();
-    let done = engine.wait_idle(std::time::Duration::from_secs(timeout_secs)).await;
+    done &= engine.wait_idle(limit).await;
     engine.stop();
     let _ = pump.await;
     engine.mem().save_views()?;

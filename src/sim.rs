@@ -33,6 +33,8 @@ pub struct SimConfig {
     pub ttl_ms: u64,
     pub limits: (usize, usize, usize, usize),
     pub seed: u64,
+    /// Size each call's tail from the node's real source (for replays of real history).
+    pub real_tails: bool,
 }
 
 impl Default for SimConfig {
@@ -49,6 +51,7 @@ impl Default for SimConfig {
             ttl_ms: 300_000,
             limits: (128_000, 64_000, 32_000, 16_000),
             seed: 1,
+            real_tails: false,
         }
     }
 }
@@ -242,7 +245,10 @@ fn start_burst(mem: &mut Memory, cache: &mut Cache, flights: &mut Vec<Flight>, r
             Job::Merge(l, i) => (i + 1) << l,
         };
         let lines = keyed(mem, mem.comp.prefix(end));
-        let tail = 1_000 + rng.next() as usize % 600;
+        let mut tail = 1_000 + rng.next() as usize % 600;
+        if cfg.real_tails {
+            tail = mem.task(job).map_or(tail, |t| t.source_bytes + 700);
+        }
         let (read, total) = cache.request(at, cfg.ttft_ms, cfg.system_bytes, &lines, tail);
         stats.0 += read;
         stats.1 += total;
@@ -253,6 +259,49 @@ fn start_burst(mem: &mut Memory, cache: &mut Cache, flights: &mut Vec<Flight>, r
         let bytes = 380 + (rng.next() % 133) as usize;
         flights.push(Flight { done: at + cfg.latency_ms, job, bytes });
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ImportReport {
+    pub calls: u64,
+    pub input_bytes: usize,
+    pub cached_bytes: usize,
+    pub cached_share: f64,
+    /// Simulated seconds from the first message to the last summary.
+    pub seconds: u64,
+}
+
+/// Replay a real history the way `endchat import --pace N` does: append `pace` messages (all of
+/// them when 0), wait until everything is summarized, append the next batch.
+pub fn run_import(dir: &Path, history: &[(Kind, String)], pace: usize, cfg: &SimConfig) -> Result<ImportReport> {
+    let (high, low, chigh, clow) = cfg.limits;
+    let limits = Limits { view_high: high, view_low: low, compaction_high: chigh, compaction_low: clow };
+    let mut mem = Memory::open(dir, &limits, cfg.workers)?;
+    let mut rng = Rng(cfg.seed);
+    let mut cache = Cache { ttl: cfg.ttl_ms, entries: HashMap::new(), pending: BinaryHeap::new() };
+    let mut flights: Vec<Flight> = Vec::new();
+    let mut stats = (0usize, 0usize, 0u64);
+    let mut now = 0;
+    let step = if pace == 0 { history.len().max(1) } else { pace };
+    for batch in history.chunks(step) {
+        for (kind, text) in batch {
+            mem.append(*kind, text, None)?;
+        }
+        mem.sched.kick();
+        start_burst(&mut mem, &mut cache, &mut flights, &mut rng, now, cfg, &mut stats);
+        while !flights.is_empty() {
+            flights.sort_by_key(|f| Reverse(f.done));
+            let f = flights.pop().expect("non-empty");
+            now = f.done;
+            let (l, i) = match f.job {
+                Job::Leaf(i) => (0, i),
+                Job::Merge(l, i) => (l, i),
+            };
+            mem.finish(crate::tree::Node::new(l, i, "s".repeat(f.bytes)), f.job)?;
+            start_burst(&mut mem, &mut cache, &mut flights, &mut rng, now, cfg, &mut stats);
+        }
+    }
+    Ok(ImportReport { calls: stats.2, input_bytes: stats.1, cached_bytes: stats.0, cached_share: stats.0 as f64 / stats.1.max(1) as f64, seconds: now / 1000 })
 }
 
 /// The gist's comparison of merge timing, on the view alone with every summary built at once:
@@ -311,6 +360,20 @@ mod tests {
         assert!(r.compaction_read_ratio > 0.8, "{r:?}");
         assert!(r.mean_rewritten_lines < 3.0, "{r:?}");
         assert!(r.mean_view_bytes > 60_000.0 && r.mean_view_bytes < 130_000.0, "{r:?}");
+    }
+
+    #[test]
+    fn importing_in_batches_sends_fewer_bytes_and_reads_more_from_cache_than_all_at_once() {
+        let history: Vec<(Kind, String)> = (0..260).map(|i| (if i % 2 == 0 { Kind::User } else { Kind::Agent }, format!("message {i} {}", "word ".repeat(250)))).collect();
+        let cfg = SimConfig { real_tails: true, ..Default::default() };
+        let run_with = |pace| {
+            let d = tempfile::tempdir().unwrap();
+            run_import(d.path(), &history, pace, &cfg).unwrap()
+        };
+        let (flood, paced) = (run_with(0), run_with(10));
+        assert!(paced.input_bytes < flood.input_bytes, "{flood:?} {paced:?}");
+        assert!(paced.cached_share > flood.cached_share, "{flood:?} {paced:?}");
+        assert!(paced.seconds > flood.seconds, "pacing waits for summaries");
     }
 
     #[test]
