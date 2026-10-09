@@ -36,10 +36,51 @@ pub struct Memory {
     pub sched: Sched,
 }
 
+/// View lines per cache block. The mark sits on the last whole block, so a later call whose
+/// view grew by up to 20 blocks (80 lines) still finds the entry.
+pub const BLOCK_LINES: usize = 4;
+
+/// A prompt as ordered blocks; at most one is marked for the prompt cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt(pub Vec<(String, bool)>);
+
+impl Prompt {
+    pub fn text(&self) -> String {
+        self.0.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    pub fn has_mark(&self) -> bool {
+        self.0.iter().any(|(_, c)| *c)
+    }
+
+    /// The JSON list `aop --prompt-parts` reads.
+    pub fn parts_json(&self) -> String {
+        let parts: Vec<serde_json::Value> = self.0.iter().map(|(t, c)| if *c { serde_json::json!({"text": t, "cache": true}) } else { serde_json::json!({"text": t}) }).collect();
+        serde_json::Value::Array(parts).to_string()
+    }
+}
+
+/// `<chat>`, the view rows in blocks of four with a mark on the last whole block, then `</chat>`
+/// and the tail. Block edges count from the first row, so successive prompts share them.
+pub fn view_prompt(rows: &[String], tail: &str) -> Prompt {
+    let whole = rows.len() / BLOCK_LINES;
+    let mut parts = Vec::with_capacity(whole + 1);
+    for k in 0..whole {
+        let mut text = if k == 0 { "<chat>\n".to_owned() } else { String::new() };
+        text += &rows[k * BLOCK_LINES..(k + 1) * BLOCK_LINES].concat();
+        parts.push((text, k + 1 == whole));
+    }
+    let mut rest = if whole == 0 { "<chat>\n".to_owned() } else { String::new() };
+    rest += &rows[whole * BLOCK_LINES..].concat();
+    rest += &format!("</chat>\n{tail}");
+    parts.push((rest, false));
+    Prompt(parts)
+}
+
 /// One compaction ready to send.
 pub struct Task {
-    /// The whole prompt: the compaction view, then the task text.
-    pub prompt: String,
+    /// The compaction view, then the task text.
+    pub prompt: Prompt,
     /// Bytes of the source the reply must be strictly smaller than.
     pub source_bytes: usize,
 }
@@ -242,15 +283,24 @@ impl Memory {
         Ok(out)
     }
 
-    /// The chat view as a turn sees it.
-    pub fn chat_block(&mut self) -> Result<String> {
-        let lines = self.chat.lines().to_vec();
-        Ok(format!("<chat>\n{}</chat>\n", self.render(&lines)?))
+    fn rows(&mut self, lines: &[Line]) -> Result<Vec<String>> {
+        lines.iter().map(|l| self.render(std::slice::from_ref(l))).collect()
     }
 
-    fn compaction_head(&mut self, end: u64) -> Result<String> {
+    /// The prompt for a turn: the chat view, then `tail` (state and the user's message).
+    pub fn chat_prompt(&mut self, tail: &str) -> Result<Prompt> {
+        let lines = self.chat.lines().to_vec();
+        Ok(view_prompt(&self.rows(&lines)?, tail))
+    }
+
+    /// The chat view as text.
+    pub fn chat_block(&mut self) -> Result<String> {
+        Ok(self.chat_prompt("")?.text())
+    }
+
+    fn compaction_prompt(&mut self, end: u64, task: &str) -> Result<Prompt> {
         let lines = self.comp.prefix(end).to_vec();
-        Ok(format!("<chat>\n{}</chat>\n", self.render(&lines)?))
+        Ok(view_prompt(&self.rows(&lines)?, task))
     }
 
     /// Everything a compaction call needs: its view up to the node and its task text.
@@ -259,27 +309,25 @@ impl Memory {
             Job::Leaf(i) => {
                 let m = self.log.get(i)?;
                 let source = m.source();
-                let head = self.compaction_head(i)?;
                 let ruler = ruler();
-                let prompt = format!(
-                    "{head}Compaction: compress message {i} into one line of at most {NODE_BYTES} bytes\n(about 70 words), the length of this ruler:\n{ruler}\n<input>\n{source}\n</input>"
+                let task = format!(
+                    "Compaction: compress message {i} into one line of at most {NODE_BYTES} bytes\n(about 70 words), the length of this ruler:\n{ruler}\n<input>\n{source}\n</input>"
                 );
-                Ok(Task { prompt, source_bytes: source.len() })
+                Ok(Task { prompt: self.compaction_prompt(i, &task)?, source_bytes: source.len() })
             }
             Job::Merge(l, i) => {
                 let (a, b) = (self.tree.get(l - 1, 2 * i)?, self.tree.get(l - 1, 2 * i + 1)?);
                 let (Some(a), Some(b)) = (a, b) else { return msg(format!("merge {} has an unbuilt half", line_name(l, i))) };
                 let (first, end) = (i << l, (i + 1) << l);
-                let head = self.compaction_head(end)?;
                 let (na, nb) = (line_name(a.l, a.i), line_name(b.l, b.i));
                 let ruler = ruler();
-                let prompt = format!(
-                    "{head}Compaction: merge lines {na} and {nb}, adjacent, into one line of at most\n{NODE_BYTES} bytes (about 70 words), the length of this ruler:\n{ruler}\n<chat> may hold their messages, {first} to {}, in more detail: take details\nof them from there too.\n<input>\n{na}|{}\n{nb}|{}\n</input>",
+                let task = format!(
+                    "Compaction: merge lines {na} and {nb}, adjacent, into one line of at most\n{NODE_BYTES} bytes (about 70 words), the length of this ruler:\n{ruler}\n<chat> may hold their messages, {first} to {}, in more detail: take details\nof them from there too.\n<input>\n{na}|{}\n{nb}|{}\n</input>",
                     end - 1,
                     flat(&a.text),
                     flat(&b.text)
                 );
-                Ok(Task { prompt, source_bytes: a.size + 1 + b.size })
+                Ok(Task { prompt: self.compaction_prompt(end, &task)?, source_bytes: a.size + 1 + b.size })
             }
         }
     }
@@ -404,6 +452,40 @@ pub mod tests {
         mem.finish(Node::new(l, i, "s".repeat(bytes)), job).unwrap();
     }
 
+    fn rows(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{i}+1|line {i}\n")).collect()
+    }
+
+    #[test]
+    fn the_view_is_sent_in_blocks_of_four_with_one_mark_on_the_last_whole_block() {
+        let p = view_prompt(&rows(10), "TAIL");
+        assert_eq!(p.0.len(), 3, "two whole blocks and the rest");
+        assert_eq!(p.0.iter().map(|(_, c)| *c).collect::<Vec<_>>(), [false, true, false]);
+        assert_eq!(p.0[0].0, "<chat>\n0+1|line 0\n1+1|line 1\n2+1|line 2\n3+1|line 3\n");
+        assert_eq!(p.0[2].0, "8+1|line 8\n9+1|line 9\n</chat>\nTAIL");
+        assert_eq!(p.text(), format!("<chat>\n{}</chat>\nTAIL", rows(10).concat()));
+        assert_eq!(p.parts_json().matches("\"cache\":true").count(), 1);
+    }
+
+    #[test]
+    fn a_longer_view_repeats_the_earlier_blocks_exactly() {
+        let (a, b) = (view_prompt(&rows(10), "one"), view_prompt(&rows(30), "two"));
+        let marked = a.0.iter().position(|(_, c)| *c).unwrap();
+        let texts = |p: &Prompt| p.0[..=marked].iter().map(|(t, _)| t.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&a), texts(&b), "the marked prefix is byte for byte the same");
+    }
+
+    #[test]
+    fn a_view_under_four_lines_has_no_mark() {
+        for n in 0..4 {
+            let p = view_prompt(&rows(n), "T");
+            assert!(!p.has_mark() && p.0.len() == 1);
+            assert!(p.text().starts_with("<chat>\n") && p.text().ends_with("</chat>\nT"));
+        }
+        assert_eq!(view_prompt(&rows(4), "T").0.len(), 2);
+        assert!(view_prompt(&rows(4), "T").has_mark());
+    }
+
     #[test]
     fn short_messages_are_free_leaves_and_short_pairs_join() {
         let d = tempfile::tempdir().unwrap();
@@ -445,8 +527,9 @@ pub mod tests {
         let job = mem.sched.next(0).unwrap();
         assert_eq!(job, Job::Merge(1, 0));
         let task = mem.task(job).unwrap();
-        assert!(task.prompt.contains("Compaction: merge lines 0+1 and 1+1, adjacent"));
-        assert!(task.prompt.contains("messages, 0 to 1,"));
+        let text = task.prompt.text();
+        assert!(text.contains("Compaction: merge lines 0+1 and 1+1, adjacent"));
+        assert!(text.contains("messages, 0 to 1,"));
         assert_eq!(task.source_bytes, 801);
     }
 
@@ -457,7 +540,7 @@ pub mod tests {
         mem.append(Kind::User, "first", None).unwrap();
         mem.append(Kind::Agent, &long(200), None).unwrap();
         mem.append(Kind::User, "third", None).unwrap();
-        let Task { prompt, .. } = mem.task(Job::Leaf(1)).unwrap();
+        let prompt = mem.task(Job::Leaf(1)).unwrap().prompt.text();
         assert!(prompt.starts_with("<chat>\n0+1|user: first\n</chat>\nCompaction: compress message 1 into one line of at most 512 bytes\n(about 70 words), the length of this ruler:\n-"));
         assert!(prompt.contains(&format!("{}\n<input>\nagent: wordword", ruler())));
         assert!(prompt.ends_with("\n</input>"));
@@ -471,7 +554,7 @@ pub mod tests {
         mem.append(Kind::Agent, &long(200), None).unwrap(); // 0: unbuilt
         mem.append(Kind::Tool, "ls", None).unwrap(); // 1: short, built
         mem.append(Kind::User, &long(200), None).unwrap(); // 2
-        let head = mem.task(Job::Leaf(2)).unwrap().prompt;
+        let head = mem.task(Job::Leaf(2)).unwrap().prompt.text();
         assert!(head.contains("0+1|(not summarized yet: zoom it)\n1+1|tool: ls\n"), "{head}");
     }
 

@@ -8,7 +8,7 @@ scenario file instead of calling a model. State lives in $FAKE_AOP_DIR.
 import fcntl, json, os, shutil, subprocess, sys
 
 D = os.environ["FAKE_AOP_DIR"]
-KNOWN_RUN = {"--agent", "--model", "--effort", "--profile", "--tools", "--system-prompt-file", "--prompt-file", "--timeout"}
+KNOWN_RUN = {"--agent", "--model", "--effort", "--profile", "--tools", "--system-prompt-file", "--prompt-file", "--prompt-parts", "--timeout"}
 KNOWN_FLAGS = {"--no-web", "--json"}
 
 
@@ -126,15 +126,23 @@ def main():
     if cmd == "run":
         opts, pos = parse(argv)
         validate_with_real_aop(argv)
-        if "--prompt-file" not in opts:
-            die("fake aop: --prompt-file is required")
-        prompt = open(opts["--prompt-file"]).read()
+        if "--prompt-file" not in opts and "--prompt-parts" not in opts:
+            die("fake aop: --prompt-file or --prompt-parts is required")
+        marks = 0
+        if "--prompt-parts" in opts:
+            parts = json.load(open(opts["--prompt-parts"]))
+            marks = sum(1 for p in parts if p.get("cache"))
+            if marks > 1:
+                die("fake aop: at most one prompt block may be cached")
+            prompt = "".join(p["text"] for p in parts)
+        else:
+            prompt = open(opts["--prompt-file"]).read()
         system = open(opts["--system-prompt-file"]).read() if "--system-prompt-file" in opts else None
         n = counter("runs")
         run_id = f"fake-{n}"
         chains[run_id] = 1
         save("chains.json", chains)
-        log({"cmd": "run", "run_id": run_id, "args": argv, "prompt": prompt, "system": system})
+        log({"cmd": "run", "run_id": run_id, "args": argv, "prompt": prompt, "system": system, "marks": marks})
         if scenario.get("fail_first", 0) >= counter("chain_starts"):
             finish(run_id, "", prompt, scenario, ok=False)
         if scenario.get("compact") == "fail":

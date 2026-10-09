@@ -128,7 +128,7 @@ fn write_prompt(engine: &Engine, text: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn run_args(engine: &Engine, prompt_file: PathBuf, label: u64) -> RunArgs {
+fn run_args(engine: &Engine, prompt_file: PathBuf, parts: bool, label: u64) -> RunArgs {
     let t = &engine.cfg.turn;
     RunArgs {
         agent: t.agent.clone(),
@@ -139,6 +139,7 @@ fn run_args(engine: &Engine, prompt_file: PathBuf, label: u64) -> RunArgs {
         tools: Some(t.tools.clone()),
         system_prompt_file: Some(engine.system_file.clone()),
         prompt_file,
+        parts,
         timeout: t.timeout,
         task: (t.profile != "sealed").then(|| format!("endchat-turn-{label}")),
     }
@@ -199,17 +200,18 @@ fn answer(engine: &Engine, call: &ToolCall) -> String {
 
 async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &UnboundedSender<TurnEvent>) -> Result<()> {
     wait_for_summaries(engine).await;
-    let (view, index) = {
+    let tail = format!("<state>\ndate: {}\n</state>\n{text}", date.map_or_else(now_iso, str::to_owned));
+    let (prompt, index) = {
         let mut m = engine.mem();
-        (m.chat_block()?, m.log.len())
+        (m.chat_prompt(&tail)?, m.log.len())
     };
     engine.append(Kind::User, text, None)?;
-    let prompt = format!("{view}<state>\ndate: {}\n</state>\n{text}", date.map_or_else(now_iso, str::to_owned));
     let aop = turn_aop(engine);
     let cleanup = engine.cfg.turn.profile == "sealed";
     let mut runs: Vec<String> = Vec::new();
-    let file = write_prompt(engine, &prompt)?;
-    let mut result = aop.run(&run_args(engine, file.clone(), index)).await;
+    let parts = engine.cfg.turn.prompt_parts && prompt.has_mark();
+    let file = write_prompt(engine, &if parts { prompt.parts_json() } else { prompt.text() })?;
+    let mut result = aop.run(&run_args(engine, file.clone(), parts, index)).await;
     let _ = std::fs::remove_file(&file);
     let mut outcome = Ok(());
     for round in 0..=engine.cfg.turn.max_rounds {

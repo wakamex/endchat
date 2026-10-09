@@ -28,7 +28,10 @@ pub struct RunArgs {
     /// Exact built-in tool set; `Some("")` means none.
     pub tools: Option<String>,
     pub system_prompt_file: Option<PathBuf>,
+    /// The prompt: text, or a JSON list of blocks when `parts` is set.
     pub prompt_file: PathBuf,
+    /// `prompt_file` holds `--prompt-parts` blocks, one of them marked for caching.
+    pub parts: bool,
     pub timeout: u64,
     /// Task label, needed by profiles that make a worktree.
     pub task: Option<String>,
@@ -76,7 +79,7 @@ pub fn run_argv(a: &RunArgs) -> Vec<String> {
     if let Some(p) = &a.system_prompt_file {
         v.extend(["--system-prompt-file".into(), p.display().to_string()]);
     }
-    v.extend(["--prompt-file".into(), a.prompt_file.display().to_string(), "--timeout".into(), a.timeout.to_string(), "--json".into()]);
+    v.extend([if a.parts { "--prompt-parts" } else { "--prompt-file" }.into(), a.prompt_file.display().to_string(), "--timeout".into(), a.timeout.to_string(), "--json".into()]);
     if let Some(t) = &a.task {
         v.push(t.clone());
     }
@@ -149,6 +152,7 @@ mod tests {
             tools: Some(String::new()),
             system_prompt_file: Some("/p/system.md".into()),
             prompt_file: "/p/task.txt".into(),
+            parts: false,
             timeout: 120,
             task: None,
         };
@@ -157,6 +161,9 @@ mod tests {
             "run --agent claude --model haiku --effort medium --profile sealed --no-web --tools  --system-prompt-file /p/system.md --prompt-file /p/task.txt --timeout 120 --json"
         );
         assert_eq!(run_argv(&a)[11], "");
+        let b = RunArgs { parts: true, ..a.clone() };
+        assert!(run_argv(&b).join(" ").contains("--prompt-parts /p/task.txt --timeout"));
+        assert!(!run_argv(&b).join(" ").contains("--prompt-file"));
         assert_eq!(resume_argv("abc", Path::new("/p/r.txt"), 60).join(" "), "resume --prompt-file /p/r.txt --timeout 60 --json abc");
     }
 

@@ -19,6 +19,8 @@ pub struct Compactor {
     /// Largest reply kept after the last retry when every attempt was over `accept_bytes`.
     pub hard_bytes: usize,
     pub timeout: u64,
+    /// Send the view as blocks with one cache mark (`aop --prompt-parts`).
+    pub prompt_parts: bool,
 }
 
 impl Default for Compactor {
@@ -31,6 +33,7 @@ impl Default for Compactor {
             accept_bytes: 640,
             hard_bytes: 1024,
             timeout: 120,
+            prompt_parts: true,
         }
     }
 }
@@ -53,6 +56,8 @@ pub struct Turn {
     pub timeout: u64,
     /// Upper bound on tool rounds in one turn.
     pub max_rounds: usize,
+    /// Send the view as blocks with one cache mark (`aop --prompt-parts`).
+    pub prompt_parts: bool,
 }
 
 impl Default for Turn {
@@ -68,6 +73,7 @@ impl Default for Turn {
             no_web: true,
             timeout: 900,
             max_rounds: 40,
+            prompt_parts: true,
         }
     }
 }

@@ -2,6 +2,7 @@
 
 use crate::aop::{Aop, AopResult, RunArgs};
 use crate::error::{Error, Result};
+use crate::memory::Prompt;
 use crate::profile::Compactor as Settings;
 use crate::tree::{NODE_BYTES, Usage};
 use crate::util::cut_bytes;
@@ -93,8 +94,9 @@ impl Compactor {
         Ok(path)
     }
 
-    async fn call(&self, run: Option<&str>, text: &str) -> Result<AopResult> {
-        let file = self.prompt_file(text)?;
+    async fn call(&self, run: Option<&str>, prompt: &Prompt) -> Result<AopResult> {
+        let parts = self.settings.prompt_parts && prompt.has_mark() && run.is_none();
+        let file = self.prompt_file(&if parts { prompt.parts_json() } else { prompt.text() })?;
         let r = match run {
             None => {
                 let args = RunArgs {
@@ -106,6 +108,7 @@ impl Compactor {
                     tools: Some(String::new()),
                     system_prompt_file: Some(self.system_file.clone()),
                     prompt_file: file.clone(),
+                    parts,
                     timeout: self.settings.timeout,
                     task: None,
                 };
@@ -119,13 +122,13 @@ impl Compactor {
 
     /// Build one node's text. `prompt` is the whole first prompt; `source_bytes` is the size the
     /// reply must be strictly under.
-    pub async fn build(&self, prompt: &str, source_bytes: usize) -> Compaction {
+    pub async fn build(&self, prompt: &Prompt, source_bytes: usize) -> Compaction {
         self.build_signalling(prompt, source_bytes, None).await
     }
 
     /// Like `build`, and sends on `first_reply` once the first call has answered, so callers can
     /// hold other calls on the same cold prefix until it is cached.
-    pub async fn build_signalling(&self, prompt: &str, source_bytes: usize, mut first_reply: Option<oneshot::Sender<()>>) -> Compaction {
+    pub async fn build_signalling(&self, prompt: &Prompt, source_bytes: usize, mut first_reply: Option<oneshot::Sender<()>>) -> Compaction {
         let mut calls = Vec::new();
         let mut runs = Vec::new();
         let result = self.attempts(prompt, source_bytes, &mut calls, &mut runs, &mut first_reply).await;
@@ -140,7 +143,7 @@ impl Compactor {
 
     async fn attempts(
         &self,
-        prompt: &str,
+        prompt: &Prompt,
         source_bytes: usize,
         calls: &mut Vec<Call>,
         runs: &mut Vec<String>,
@@ -148,7 +151,7 @@ impl Compactor {
     ) -> std::result::Result<Built, String> {
         let mut usage = Usage::default();
         let mut best: Option<(String, String, Option<String>)> = None;
-        let mut text = prompt.to_owned();
+        let mut text = prompt.clone();
         let mut last_run: Option<String> = None;
         for attempt in 1..=MAX_ATTEMPTS {
             let r = self.call(last_run.as_deref(), &text).await;
@@ -175,7 +178,7 @@ impl Compactor {
             if done || attempt == MAX_ATTEMPTS {
                 break;
             }
-            text = too_long_message(&reply, source_bytes);
+            text = Prompt(vec![(too_long_message(&reply, source_bytes), false)]);
             last_run = Some(r.run_id);
         }
         let (text, run, model) = best.expect("at least one attempt");
@@ -233,12 +236,14 @@ mod tests {
         Compactor::new(fake.aop(), Settings::default(), system, scratch)
     }
 
-    const PROMPT: &str = "<chat>\n</chat>\nCompaction: compress message 3 into one line\n<input>\nuser: hello there\n</input>";
+    fn prompt() -> Prompt {
+        Prompt(vec![("<chat>\n</chat>\nCompaction: compress message 3 into one line\n<input>\nuser: hello there\n</input>".into(), false)])
+    }
 
     #[tokio::test]
     async fn an_acceptable_reply_is_one_call_then_cleanup() {
         let fake = FakeAop::new(json!({"compact": "ok"}));
-        let out = compactor(&fake).build(PROMPT, 2_000).await;
+        let out = compactor(&fake).build(&prompt(), 2_000).await;
         let built = out.result.unwrap();
         assert!(built.text.starts_with("user: hello there") && built.text.len() == 300);
         assert_eq!((out.calls.len(), built.run.as_str(), built.usage.output_tokens), (1, "fake-1", 40));
@@ -253,7 +258,7 @@ mod tests {
     #[tokio::test]
     async fn too_long_replies_retry_in_the_same_conversation_and_sum_usage() {
         let fake = FakeAop::new(json!({"compact": "long:2"}));
-        let out = compactor(&fake).build(PROMPT, 2_000).await;
+        let out = compactor(&fake).build(&prompt(), 2_000).await;
         let built = out.result.unwrap();
         assert_eq!(built.text.len(), 300);
         assert_eq!(built.run, "fake-3");
@@ -269,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn after_five_attempts_the_shortest_reply_within_the_hard_cap_stands() {
         let fake = FakeAop::new(json!({"compact": "always_long"}));
-        let out = compactor(&fake).build(PROMPT, 2_000).await;
+        let out = compactor(&fake).build(&prompt(), 2_000).await;
         assert_eq!(out.calls.len(), MAX_ATTEMPTS);
         assert_eq!(out.result.unwrap().text.len(), 900);
     }
@@ -277,7 +282,7 @@ mod tests {
     #[tokio::test]
     async fn a_reply_over_the_hard_cap_writes_no_node() {
         let fake = FakeAop::new(json!({"compact": "never_small"}));
-        let out = compactor(&fake).build(PROMPT, 5_000).await;
+        let out = compactor(&fake).build(&prompt(), 5_000).await;
         assert_eq!(out.calls.len(), MAX_ATTEMPTS);
         assert!(out.result.err().unwrap().contains("no reply under 1024 bytes"));
     }
@@ -285,9 +290,9 @@ mod tests {
     #[tokio::test]
     async fn an_empty_reply_and_a_failed_call_are_errors() {
         let fake = FakeAop::new(json!({"compact": "empty"}));
-        assert!(compactor(&fake).build(PROMPT, 2_000).await.result.err().unwrap().contains("empty reply"));
+        assert!(compactor(&fake).build(&prompt(), 2_000).await.result.err().unwrap().contains("empty reply"));
         fake.set_scenario(json!({"compact": "fail"}));
-        let out = compactor(&fake).build(PROMPT, 2_000).await;
+        let out = compactor(&fake).build(&prompt(), 2_000).await;
         assert!(out.result.err().unwrap().contains("failed"));
         assert_eq!(out.calls.len(), 1);
         assert!(!out.calls[0].ok);
@@ -296,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn a_copied_head_is_stripped_before_the_size_check() {
         let fake = FakeAop::new(json!({"compact": "prefixed"}));
-        let built = compactor(&fake).build(PROMPT, 2_000).await.result.unwrap();
+        let built = compactor(&fake).build(&prompt(), 2_000).await.result.unwrap();
         assert!(built.text.starts_with("user: hello"), "{}", built.text);
     }
 
@@ -308,8 +313,33 @@ mod tests {
         let fake = FakeAop::new(json!({"compact": "ok"}));
         let mut c = compactor(&fake);
         c.settings.effort = "bogus".into();
-        let err = c.build(PROMPT, 2_000).await.result.err().unwrap();
+        let err = c.build(&prompt(), 2_000).await.result.err().unwrap();
         assert!(err.contains("invalid choice"), "{err}");
         assert!(fake.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_marked_prompt_goes_out_as_prompt_parts_and_a_retry_as_text() {
+        let fake = FakeAop::new(json!({"compact": "long:1"}));
+        let rows: Vec<String> = (0..9).map(|i| format!("{i}+1|line {i}\n")).collect();
+        let prompt = crate::memory::view_prompt(&rows, "Compaction: compress message 9\n<input>\nuser: hi\n</input>");
+        let built = compactor(&fake).build(&prompt, 2_000).await.result.unwrap();
+        assert_eq!(built.text.len(), 300);
+        let calls = fake.calls();
+        assert!(calls[0]["args"].to_string().contains("--prompt-parts"), "{}", calls[0]["args"]);
+        assert_eq!(calls[0]["marks"], 1);
+        assert_eq!(calls[0]["prompt"].as_str().unwrap(), prompt.text());
+        assert!(calls[1]["args"].to_string().contains("--prompt-file") && calls[1]["prompt"].as_str().unwrap().starts_with("Too long"));
+    }
+
+    #[tokio::test]
+    async fn prompt_parts_can_be_turned_off() {
+        let fake = FakeAop::new(json!({"compact": "ok"}));
+        let rows: Vec<String> = (0..9).map(|i| format!("{i}+1|line {i}\n")).collect();
+        let prompt = crate::memory::view_prompt(&rows, "Compaction: x\n<input>\ny\n</input>");
+        let mut c = compactor(&fake);
+        c.settings.prompt_parts = false;
+        c.build(&prompt, 2_000).await.result.unwrap();
+        assert!(fake.calls()[0]["args"].to_string().contains("--prompt-file"));
     }
 }
