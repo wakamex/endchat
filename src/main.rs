@@ -242,8 +242,11 @@ async fn import(profile: &str, file: &std::path::Path, timeout_secs: u64, pace: 
             engine.mem().append_dated(m.kind, &m.text, None, &m.date)?;
         }
         engine.changed();
-        if pace > 0 {
-            done &= engine.wait_idle(limit).await;
+        if pace > 0 && !engine.wait_idle(limit).await {
+            // A batch that does not finish (for example expired credentials) would make every
+            // later batch wait out the limit as well.
+            done = false;
+            break;
         }
     }
     done &= engine.wait_idle(limit).await;
