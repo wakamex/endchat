@@ -46,12 +46,14 @@ Choices made while implementing [SPEC.md](SPEC.md), each with the reason. They w
 
 ## Decisions about the prompt and turns
 
-1. The agent is named Endchat. `prompts/system.md` holds the gist's prompt with three departures, each commented in the file: the name and the `agent` kind, no paragraph on the user's computers, and one paragraph on calling tools as text (decision 1 about AOP). The paragraph is the only addition. HTML comments are removed before the prompt is used, so the model never sees them.
+1. The agent is named Endchat. `prompts/system.md` holds the gist's prompt with four departures, each commented in the file: the name and the `agent` kind, no paragraph on the user's computers, and one paragraph on calling tools as text (decision 1 about AOP). The paragraph is the only addition. HTML comments are removed before the prompt is used, so the model never sees them.
 2. The user's own instructions come from `PROFILE/instructions.md` when it exists and follow the prompt after a blank line, as the gist describes.
 3. A turn waits, renders the view, logs the user message, and only then calls the model, so the view in the prompt is the view before the message, and the message follows it after a `<state>` block holding the current date. Nothing else is sent as per-turn state.
 4. Reply text containing call lines is logged without them: the `agent` message keeps the prose, and each call is its own `tool` message. A reply that is only calls logs no `agent` message.
 5. Messages sent during a turn are logged as `user` messages when they are delivered with a tool result. Messages that arrive when the turn makes no more calls start the next turn, in order.
-6. A turn stops after `turn.max_rounds` (40) rounds of calls and reports an error rather than looping.
+6. A reply that holds an XML-style call (`<invoke name="zoom">` with `<parameter>` tags) is read as the same call, and a reply whose call cannot be read is answered with a request to write calls as plain lines, instead of ending the turn with the fragment as the answer.
+7. The prompt's fourth departure tells the model that view lines are a table of contents and that a factual question is answered only after zooming to the messages, and the `<state>` block of every message repeats that in one line. On the 11 multi-session LongMemEval questions that earlier runs answered wrongly without any zoom, the plain paragraph left 10 of 11 still unzoomed. The imperative paragraph with the per-message note brought zooming to 9 of 11, and a closing instruction to rescan for unopened lines gave 4 of 11 correct against 1 of 11 without the changes.
+8. A turn stops after `turn.max_rounds` (40) rounds of calls and reports an error rather than looping.
 
 ## Decisions about verification
 

@@ -119,6 +119,9 @@ pub fn strip_calls(text: &str) -> String {
     normalize(text).lines().filter(|l| parse_line(l).is_none() && !is_fragment(l)).collect::<Vec<_>>().join("\n").trim().to_owned()
 }
 
+/// Repeated with every message, where the model is least likely to skip it.
+const TAIL_NOTE: &str = "note: the view lines are summaries. Zoom to the original messages before you answer anything about the chat, and do not answer from the lines alone.";
+
 const BROKEN_CALL: &str = "Your last reply held a tool call that could not be read. Write each call alone on a line, such as zoom(40, 8) or date(7), then answer the user once you have what you need.\n";
 
 fn emit(tx: &UnboundedSender<TurnEvent>, e: TurnEvent) {
@@ -245,7 +248,7 @@ fn answer(engine: &Engine, call: &ToolCall) -> String {
 
 async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &UnboundedSender<TurnEvent>) -> Result<()> {
     wait_for_summaries(engine).await;
-    let tail = format!("<state>\ndate: {}\n</state>\n{text}", date.map_or_else(now_iso, str::to_owned));
+    let tail = format!("<state>\ndate: {}\n{TAIL_NOTE}\n</state>\n{text}", date.map_or_else(now_iso, str::to_owned));
     let (prompt, index) = {
         let mut m = engine.mem();
         (m.chat_prompt(&tail)?, m.log.len())
