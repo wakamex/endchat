@@ -67,14 +67,59 @@ fn parse_line(line: &str) -> Option<ToolCall> {
     }
 }
 
+/// The reply with XML-style calls (`<invoke name="zoom"><parameter name="id">3</parameter>...`) rewritten
+/// as call lines, which some replies use instead of the prompt's syntax.
+fn normalize(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("<invoke name=\"") {
+        out += &rest[..at];
+        let from = &rest[at + "<invoke name=\"".len()..];
+        let name = from.split('"').next().unwrap_or("");
+        let end = from.find("</invoke>").map(|e| e + "</invoke>".len()).or_else(|| from.find("<invoke ")).unwrap_or(from.len());
+        let (body, after) = from.split_at(end);
+        let mut args: Vec<(&str, &str)> = Vec::new();
+        let mut p = body;
+        while let Some(i) = p.find("<parameter name=\"") {
+            p = &p[i + "<parameter name=\"".len()..];
+            let Some((key, tail)) = p.split_once("\">") else { break };
+            let value = tail.split("</parameter>").next().unwrap_or("").trim();
+            args.push((key, value));
+        }
+        let arg = |k: &str| args.iter().find(|(a, _)| *a == k).map(|(_, v)| *v);
+        match (name, arg("id")) {
+            ("zoom", Some(id)) => {
+                out += &format!("\nzoom({id}, {}{})\n", arg("n").unwrap_or("1"), arg("offset").map_or(String::new(), |o| format!(", {o}")));
+            }
+            ("date", Some(id)) => out += &format!("\ndate({id})\n"),
+            _ => out += "\n<invoke>\n",
+        }
+        rest = after;
+    }
+    out + rest
+}
+
 pub fn parse_calls(text: &str) -> Vec<ToolCall> {
-    text.lines().filter_map(parse_line).collect()
+    normalize(text).lines().filter_map(parse_line).collect()
+}
+
+/// A leftover tool-call fragment that parsed to nothing.
+fn is_fragment(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("<invoke") || t.starts_with("</invoke") || t.starts_with("<parameter")
+}
+
+/// The reply has a tool call that could not be read.
+pub fn has_broken_call(text: &str) -> bool {
+    normalize(text).lines().any(is_fragment)
 }
 
 /// The reply without its call lines.
 pub fn strip_calls(text: &str) -> String {
-    text.lines().filter(|l| parse_line(l).is_none()).collect::<Vec<_>>().join("\n").trim().to_owned()
+    normalize(text).lines().filter(|l| parse_line(l).is_none() && !is_fragment(l)).collect::<Vec<_>>().join("\n").trim().to_owned()
 }
+
+const BROKEN_CALL: &str = "Your last reply held a tool call that could not be read. Write each call alone on a line, such as zoom(40, 8) or date(7), then answer the user once you have what you need.\n";
 
 fn emit(tx: &UnboundedSender<TurnEvent>, e: TurnEvent) {
     let _ = tx.send(e);
@@ -235,7 +280,8 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             outcome = msg(r.failure());
             break;
         }
-        if calls.is_empty() {
+        let broken = calls.is_empty() && has_broken_call(r.reply());
+        if calls.is_empty() && !broken {
             break;
         }
         if round == engine.cfg.turn.max_rounds {
@@ -243,6 +289,9 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             break;
         }
         let mut next = String::new();
+        if broken {
+            next += BROKEN_CALL;
+        }
         for c in &calls {
             log(engine, tx, Kind::Tool, &c.log_text(), &r.run_id)?;
             let out = answer(engine, c);
@@ -283,6 +332,14 @@ mod tests {
         );
         assert_eq!(strip_calls(text), "Let me look.\nSee zoom(1, 1) for details.\nzoom(x, 2)\nzoom(1)");
         assert_eq!(strip_calls("zoom(1, 1)"), "");
+        let xml = "Looking.\n<invoke name=\"zoom\">\n<parameter name=\"id\">5</parameter>\n<parameter name=\"n\">2</parameter>\n</invoke>\n<invoke name=\"date\"><parameter name=\"id\">9</parameter></invoke>";
+        assert_eq!(parse_calls(xml), [ToolCall::Zoom { id: 5, n: 2, offset: 0 }, ToolCall::Date { id: 9 }]);
+        assert_eq!(strip_calls(xml), "Looking.");
+        assert!(!has_broken_call(xml));
+        let junk = "<invoke name=\"date\">\n<parameter name=\"id\">1</parameter>\n</invoke>\n\n<parameter name=\"id\">0</parameter>\n</invoke>";
+        assert_eq!(parse_calls(junk), [ToolCall::Date { id: 1 }]);
+        assert!(has_broken_call(junk));
+        assert_eq!(strip_calls(junk), "");
         assert_eq!(ToolCall::Zoom { id: 40, n: 8, offset: 0 }.log_text(), r#"zoom {"id":40,"n":8}"#);
     }
 
