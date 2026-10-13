@@ -34,6 +34,8 @@ pub enum TurnEvent {
 pub enum ToolCall {
     Zoom { id: u64, n: u64, offset: usize },
     Date { id: u64 },
+    /// A configured command and its argument text.
+    Ext { name: String, arg: String },
 }
 
 impl ToolCall {
@@ -42,6 +44,7 @@ impl ToolCall {
             ToolCall::Zoom { id, n, offset: 0 } => format!("zoom {{\"id\":{id},\"n\":{n}}}"),
             ToolCall::Zoom { id, n, offset } => format!("zoom {{\"id\":{id},\"n\":{n},\"offset\":{offset}}}"),
             ToolCall::Date { id } => format!("date {{\"id\":{id}}}"),
+            ToolCall::Ext { name, arg } => format!("{name} {}", serde_json::Value::from(arg.as_str())),
         }
     }
 
@@ -50,13 +53,23 @@ impl ToolCall {
             ToolCall::Zoom { id, n, offset: 0 } => format!("zoom({id}, {n})"),
             ToolCall::Zoom { id, n, offset } => format!("zoom({id}, {n}, {offset})"),
             ToolCall::Date { id } => format!("date({id})"),
+            ToolCall::Ext { name, arg } => format!("{name} {arg}"),
         }
     }
 }
 
 /// A line that is exactly one call, optionally in backticks.
-fn parse_line(line: &str) -> Option<ToolCall> {
+fn parse_line(line: &str, cmds: &[String]) -> Option<ToolCall> {
     let t = line.trim().trim_matches('`').trim();
+    for name in cmds {
+        let Some(rest) = t.strip_prefix(name.as_str()) else { continue };
+        let arg = match rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+            Some(inner) => inner,
+            None if rest.starts_with(' ') => rest,
+            None => continue,
+        };
+        return Some(ToolCall::Ext { name: name.clone(), arg: arg.trim().to_owned() });
+    }
     let (name, rest) = t.split_once('(')?;
     let args: Vec<u64> = rest.strip_suffix(')')?.split(',').map(|a| a.trim().parse().ok()).collect::<Option<_>>()?;
     match (name, args.as_slice()) {
@@ -69,7 +82,7 @@ fn parse_line(line: &str) -> Option<ToolCall> {
 
 /// The reply with XML-style calls (`<invoke name="zoom"><parameter name="id">3</parameter>...`) rewritten
 /// as call lines, which some replies use instead of the prompt's syntax.
-fn normalize(text: &str) -> String {
+fn normalize(text: &str, cmds: &[String]) -> String {
     let mut out = String::new();
     let mut rest = text;
     while let Some(at) = rest.find("<invoke name=\"") {
@@ -92,6 +105,9 @@ fn normalize(text: &str) -> String {
                 out += &format!("\nzoom({id}, {}{})\n", arg("n").unwrap_or("1"), arg("offset").map_or(String::new(), |o| format!(", {o}")));
             }
             ("date", Some(id)) => out += &format!("\ndate({id})\n"),
+            (n, _) if cmds.iter().any(|c| c == n) => {
+                out += &format!("\n{n}({})\n", args.iter().map(|(_, v)| *v).collect::<Vec<_>>().join(" "));
+            }
             _ => out += "\n<invoke>\n",
         }
         rest = after;
@@ -99,8 +115,8 @@ fn normalize(text: &str) -> String {
     out + rest
 }
 
-pub fn parse_calls(text: &str) -> Vec<ToolCall> {
-    normalize(text).lines().filter_map(parse_line).collect()
+pub fn parse_calls(text: &str, cmds: &[String]) -> Vec<ToolCall> {
+    normalize(text, cmds).lines().filter_map(|l| parse_line(l, cmds)).collect()
 }
 
 /// A leftover tool-call fragment that parsed to nothing.
@@ -110,19 +126,23 @@ fn is_fragment(line: &str) -> bool {
 }
 
 /// The reply has a tool call that could not be read.
-pub fn has_broken_call(text: &str) -> bool {
-    normalize(text).lines().any(is_fragment)
+pub fn has_broken_call(text: &str, cmds: &[String]) -> bool {
+    normalize(text, cmds).lines().any(is_fragment)
 }
 
 /// The reply without its call lines.
-pub fn strip_calls(text: &str) -> String {
-    normalize(text).lines().filter(|l| parse_line(l).is_none() && !is_fragment(l)).collect::<Vec<_>>().join("\n").trim().to_owned()
+pub fn strip_calls(text: &str, cmds: &[String]) -> String {
+    normalize(text, cmds).lines().filter(|l| parse_line(l, cmds).is_none() && !is_fragment(l)).collect::<Vec<_>>().join("\n").trim().to_owned()
 }
 
 /// Repeated with every message, where the model is least likely to skip it.
 const TAIL_NOTE: &str = "note: the view lines are summaries. Zoom to the original messages before you answer anything about the chat, and do not answer from the lines alone.";
 
-const BROKEN_CALL: &str = "Your last reply held a tool call that could not be read. Write each call alone on a line, such as zoom(40, 8) or date(7), then answer the user once you have what you need.\n";
+const BROKEN_CALL: &str = "Your last reply held a tool call that could not be read. Write each call alone on a line, in the form the system prompt shows, then answer the user once you have what you need.\n";
+
+fn cmds(engine: &Engine) -> Vec<String> {
+    engine.cfg.turn.commands.keys().cloned().collect()
+}
 
 fn emit(tx: &UnboundedSender<TurnEvent>, e: TurnEvent) {
     let _ = tx.send(e);
@@ -217,7 +237,7 @@ fn log_run(engine: &Engine, tx: &UnboundedSender<TurnEvent>, aop: &crate::aop::A
     let events = std::fs::read_to_string(aop.events_path(&r.run_id)).map(|s| parse_claude(&s)).unwrap_or_default();
     if events.is_empty() {
         eprintln!("endchat: no readable events for run {}; logging its final message only", r.run_id);
-        let text = strip_calls(r.reply());
+        let text = strip_calls(r.reply(), &cmds(engine));
         if !text.is_empty() {
             log(engine, tx, Kind::Agent, &text, &r.run_id)?;
         }
@@ -225,7 +245,7 @@ fn log_run(engine: &Engine, tx: &UnboundedSender<TurnEvent>, aop: &crate::aop::A
     for e in events {
         match e {
             Event::Text(t) => {
-                let text = strip_calls(&t);
+                let text = strip_calls(&t, &cmds(engine));
                 if !text.is_empty() {
                     log(engine, tx, Kind::Agent, &text, &r.run_id)?;
                 }
@@ -234,21 +254,31 @@ fn log_run(engine: &Engine, tx: &UnboundedSender<TurnEvent>, aop: &crate::aop::A
             Event::ToolResult(t) => log(engine, tx, Kind::Echo, &t, &r.run_id)?,
         }
     }
-    Ok(parse_calls(r.reply()))
+    Ok(parse_calls(r.reply(), &cmds(engine)))
 }
 
 fn answer(engine: &Engine, call: &ToolCall) -> String {
-    let mut m = engine.mem();
     let r = match call {
-        ToolCall::Zoom { id, n, offset } => m.zoom(*id, *n, *offset),
-        ToolCall::Date { id } => m.date(*id),
+        ToolCall::Ext { name, arg } => return run_command(engine, name, arg),
+        _ if !engine.cfg.turn.zoom => return "error: zoom and date are not available in this chat".to_owned(),
+        ToolCall::Zoom { id, n, offset } => engine.mem().zoom(*id, *n, *offset),
+        ToolCall::Date { id } => engine.mem().date(*id),
     };
     r.unwrap_or_else(|e| format!("error: {e}"))
 }
 
+fn run_command(engine: &Engine, name: &str, arg: &str) -> String {
+    match std::process::Command::new(&engine.cfg.turn.commands[name]).arg(&engine.dir).arg(arg).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Ok(o) => format!("error: {}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+        Err(e) => format!("error: {name} could not run: {e}"),
+    }
+}
+
 async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &UnboundedSender<TurnEvent>) -> Result<()> {
     wait_for_summaries(engine).await;
-    let tail = format!("<state>\ndate: {}\n{TAIL_NOTE}\n</state>\n{text}", date.map_or_else(now_iso, str::to_owned));
+    let note = engine.cfg.turn.tail_note.as_deref().unwrap_or(TAIL_NOTE);
+    let tail = format!("<state>\ndate: {}\n{note}\n</state>\n{text}", date.map_or_else(now_iso, str::to_owned));
     let (prompt, index) = {
         let mut m = engine.mem();
         (m.chat_prompt(&tail)?, m.log.len())
@@ -283,7 +313,7 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             outcome = msg(r.failure());
             break;
         }
-        let broken = calls.is_empty() && has_broken_call(r.reply());
+        let broken = calls.is_empty() && has_broken_call(r.reply(), &cmds(engine));
         if calls.is_empty() && !broken {
             break;
         }
@@ -330,20 +360,33 @@ mod tests {
     fn calls_are_whole_lines() {
         let text = "Let me look.\nzoom(40, 8)\n`date(7)`\nzoom(7, 1, 25000)\nSee zoom(1, 1) for details.\nzoom(x, 2)\nzoom(1)";
         assert_eq!(
-            parse_calls(text),
+            parse_calls(text, &[]),
             [ToolCall::Zoom { id: 40, n: 8, offset: 0 }, ToolCall::Date { id: 7 }, ToolCall::Zoom { id: 7, n: 1, offset: 25_000 }]
         );
-        assert_eq!(strip_calls(text), "Let me look.\nSee zoom(1, 1) for details.\nzoom(x, 2)\nzoom(1)");
-        assert_eq!(strip_calls("zoom(1, 1)"), "");
+        assert_eq!(strip_calls(text, &[]), "Let me look.\nSee zoom(1, 1) for details.\nzoom(x, 2)\nzoom(1)");
+        assert_eq!(strip_calls("zoom(1, 1)", &[]), "");
         let xml = "Looking.\n<invoke name=\"zoom\">\n<parameter name=\"id\">5</parameter>\n<parameter name=\"n\">2</parameter>\n</invoke>\n<invoke name=\"date\"><parameter name=\"id\">9</parameter></invoke>";
-        assert_eq!(parse_calls(xml), [ToolCall::Zoom { id: 5, n: 2, offset: 0 }, ToolCall::Date { id: 9 }]);
-        assert_eq!(strip_calls(xml), "Looking.");
-        assert!(!has_broken_call(xml));
+        assert_eq!(parse_calls(xml, &[]), [ToolCall::Zoom { id: 5, n: 2, offset: 0 }, ToolCall::Date { id: 9 }]);
+        assert_eq!(strip_calls(xml, &[]), "Looking.");
+        assert!(!has_broken_call(xml, &[]));
         let junk = "<invoke name=\"date\">\n<parameter name=\"id\">1</parameter>\n</invoke>\n\n<parameter name=\"id\">0</parameter>\n</invoke>";
-        assert_eq!(parse_calls(junk), [ToolCall::Date { id: 1 }]);
-        assert!(has_broken_call(junk));
-        assert_eq!(strip_calls(junk), "");
+        assert_eq!(parse_calls(junk, &[]), [ToolCall::Date { id: 1 }]);
+        assert!(has_broken_call(junk, &[]));
+        assert_eq!(strip_calls(junk, &[]), "");
         assert_eq!(ToolCall::Zoom { id: 40, n: 8, offset: 0 }.log_text(), r#"zoom {"id":40,"n":8}"#);
+    }
+
+    #[test]
+    fn configured_commands_are_calls_in_either_form() {
+        let cmds = ["search".to_owned(), "sch".to_owned()];
+        let text = "Looking.\nsearch(\"boots (Zara)\")\n`sch -t user \"boots|zara\"`\nsearching is fun\nsch";
+        let ext = |n: &str, a: &str| ToolCall::Ext { name: n.into(), arg: a.into() };
+        assert_eq!(parse_calls(text, &cmds), [ext("search", "\"boots (Zara)\""), ext("sch", "-t user \"boots|zara\"")]);
+        assert_eq!(strip_calls(text, &cmds), "Looking.\nsearching is fun\nsch");
+        assert_eq!(parse_calls(text, &[]), []);
+        let xml = "<invoke name=\"search\">\n<parameter name=\"query\">red boots</parameter>\n</invoke>";
+        assert_eq!(parse_calls(xml, &cmds), [ext("search", "red boots")]);
+        assert_eq!(ext("sch", "-A 1 x").log_text(), r#"sch "-A 1 x""#);
     }
 
     fn engine(fake: &FakeAop, dir: &std::path::Path) -> Arc<Engine> {

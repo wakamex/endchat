@@ -3,6 +3,7 @@
 use crate::error::{Error, Result, msg};
 use rustix::fs::{FlockOperation, flock};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -58,6 +59,13 @@ pub struct Turn {
     pub max_rounds: usize,
     /// Send the view as blocks with one cache mark (`aop --prompt-parts`).
     pub prompt_parts: bool,
+    /// Answer `zoom` and `date` calls. Off leaves the model with `commands` only.
+    pub zoom: bool,
+    /// Extra text tools: name to program. A reply line `name(ARG)` or `name ARG` runs
+    /// `program PROFILE_DIR ARG` and returns its output.
+    pub commands: BTreeMap<String, String>,
+    /// Replaces the note sent with every message.
+    pub tail_note: Option<String>,
 }
 
 impl Default for Turn {
@@ -74,6 +82,9 @@ impl Default for Turn {
             timeout: 900,
             max_rounds: 40,
             prompt_parts: true,
+            zoom: true,
+            commands: BTreeMap::new(),
+            tail_note: None,
         }
     }
 }
@@ -97,6 +108,8 @@ impl Default for Limits {
 #[serde(default)]
 pub struct Config {
     pub aop_bin: String,
+    /// A file that replaces the built-in system prompt.
+    pub system_prompt: Option<PathBuf>,
     pub compactor: Compactor,
     pub turn: Turn,
     pub limits: Limits,
@@ -104,7 +117,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { aop_bin: "aop".into(), compactor: Compactor::default(), turn: Turn::default(), limits: Limits::default() }
+        Self { aop_bin: "aop".into(), system_prompt: None, compactor: Compactor::default(), turn: Turn::default(), limits: Limits::default() }
     }
 }
 

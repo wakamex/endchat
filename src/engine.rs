@@ -100,7 +100,11 @@ impl Engine {
         }
         let instructions = fs::read_to_string(dir.join("instructions.md")).ok();
         let system_file = dir.join("system-prompt.txt");
-        fs::write(&system_file, prompts::system(instructions.as_deref()))?;
+        let system = match &cfg.system_prompt {
+            Some(p) => fs::read_to_string(p)?,
+            None => prompts::system(instructions.as_deref()),
+        };
+        fs::write(&system_file, system)?;
         let mem = Memory::open(dir, &Limits::from(&cfg.limits), cfg.compactor.workers)?;
         let aop = Aop { bin: cfg.aop_bin.clone(), cwd: dir.to_owned() };
         let compactor = Compactor::new(aop, cfg.compactor.clone(), system_file.clone(), scratch.clone());
