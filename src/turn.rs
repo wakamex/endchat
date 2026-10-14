@@ -281,7 +281,8 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
     let tail = format!("<state>\ndate: {}\n{note}\n</state>\n{text}", date.map_or_else(now_iso, str::to_owned));
     let (prompt, index) = {
         let mut m = engine.mem();
-        (m.chat_prompt(&tail)?, m.log.len())
+        let prompt = if engine.cfg.turn.view { m.chat_prompt(&tail)? } else { crate::memory::view_prompt(&[], &tail) };
+        (prompt, m.log.len())
     };
     engine.append(Kind::User, text, None)?;
     let aop = turn_aop(engine);

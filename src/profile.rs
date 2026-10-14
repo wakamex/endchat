@@ -66,6 +66,8 @@ pub struct Turn {
     pub commands: BTreeMap<String, String>,
     /// Replaces the note sent with every message.
     pub tail_note: Option<String>,
+    /// Send the chat view with every message. Off sends the message alone.
+    pub view: bool,
 }
 
 impl Default for Turn {
@@ -85,6 +87,7 @@ impl Default for Turn {
             zoom: true,
             commands: BTreeMap::new(),
             tail_note: None,
+            view: true,
         }
     }
 }
