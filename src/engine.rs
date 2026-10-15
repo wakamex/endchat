@@ -275,11 +275,21 @@ impl Engine {
             Err(e) => self.job_failed(job, e),
         }
     }
+}
 
+fn is_quota_error(why: &str) -> bool {
+    let low = why.to_ascii_lowercase();
+    ["hit your session limit", "hit your usage limit", "out of extra usage", "quota exceeded", "insufficient_quota"].iter().any(|p| low.contains(p))
+}
+
+impl Engine {
     fn job_failed(&self, job: Job, why: String) {
         let now = self.now_ms();
         let mut m = self.mem();
         m.sched.failed(job, now);
+        if is_quota_error(&why) {
+            m.sched.pause();
+        }
         let name = match job {
             Job::Leaf(i) => format!("message {i}"),
             Job::Merge(l, i) => format!("line {}", crate::memory::line_name(l, i)),
@@ -300,6 +310,10 @@ impl Engine {
                 let m = self.mem();
                 if m.sched.is_idle() && m.sched.unbuilt_leaves() == 0 {
                     return true;
+                }
+                let now = self.now_ms();
+                if m.sched.running() == 0 && !m.sched.has_startable(now) && m.sched.next_retry(now).is_none() {
+                    return false;
                 }
             }
             if tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), rx.changed()).await.is_err() {

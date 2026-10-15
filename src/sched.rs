@@ -26,8 +26,11 @@ pub struct Sched {
     ready_leaves: BTreeSet<u64>,
     ready_merges: BTreeSet<(u64, u32, u64)>,
     running: HashSet<Job>,
-    /// Failure count and earliest retry time (ms) per job.
+    /// Failure count and earliest retry time (ms) per job; `u64::MAX` means wait for `kick`.
     fails: HashMap<Job, (u32, u64)>,
+    consecutive_fails: u32,
+    backoff_until: u64,
+    paused: bool,
 }
 
 impl Sched {
@@ -39,6 +42,9 @@ impl Sched {
             ready_merges: BTreeSet::new(),
             running: HashSet::new(),
             fails: HashMap::new(),
+            consecutive_fails: 0,
+            backoff_until: 0,
+            paused: false,
         }
     }
 
@@ -63,6 +69,8 @@ impl Sched {
     pub fn built(&mut self, job: Job) {
         self.running.remove(&job);
         self.fails.remove(&job);
+        self.consecutive_fails = 0;
+        self.backoff_until = 0;
         match job {
             Job::Leaf(i) => {
                 self.unbuilt_leaves.remove(&i);
@@ -106,7 +114,7 @@ impl Sched {
     /// worker goes to a ready merge when none is running, so the views can still shrink while
     /// leaves keep every worker busy.
     pub fn next(&mut self, now: u64) -> Option<Job> {
-        if self.running.len() >= self.workers {
+        if self.running.len() >= self.workers || self.paused || now < self.backoff_until {
             return None;
         }
         let merge = self.next_merge(now);
@@ -126,20 +134,38 @@ impl Sched {
         Some(job)
     }
 
-    /// A call failed for good: requeue the job after 10 seconds, then 30, then 60.
+    /// A call failed for good: requeue the job after 10 seconds, then 30, then 60, then 60, and
+    /// stop retrying after that until a new message arrives (`kick`).
     pub fn failed(&mut self, job: Job, now: u64) {
         self.running.remove(&job);
+        self.consecutive_fails += 1;
         let e = self.fails.entry(job).or_insert((0, 0));
         e.0 += 1;
-        e.1 = now + BACKOFF_SECS[(e.0 as usize - 1).min(BACKOFF_SECS.len() - 1)] * 1000;
+        e.1 = match BACKOFF_SECS.get(e.0 as usize - 1) {
+            Some(&secs) => now.saturating_add(secs * 1000),
+            None => u64::MAX,
+        };
+        if self.consecutive_fails > BACKOFF_SECS.len() as u32 {
+            self.paused = true;
+        } else if e.1 < u64::MAX {
+            self.backoff_until = self.backoff_until.max(e.1);
+        }
         match job {
             Job::Leaf(i) => self.ready_leaves.insert(i),
             Job::Merge(l, i) => self.ready_merges.insert(Job::merge_key(l, i)),
         };
     }
 
+    /// Pause all scheduling until `kick` (used on quota exhaustion).
+    pub fn pause(&mut self) {
+        self.paused = true;
+    }
+
     /// A new message arrived: retry everything that is waiting out a failure.
     pub fn kick(&mut self) {
+        self.paused = false;
+        self.consecutive_fails = 0;
+        self.backoff_until = 0;
         for v in self.fails.values_mut() {
             v.1 = 0;
         }
@@ -151,7 +177,14 @@ impl Sched {
 
     /// Earliest time (ms) a backed-off job becomes startable.
     pub fn next_retry(&self, now: u64) -> Option<u64> {
-        self.fails.values().map(|f| f.1).filter(|&t| t > now).min()
+        if self.paused {
+            return None;
+        }
+        self.fails.values().map(|f| f.1.max(self.backoff_until)).filter(|&t| t > now && t < u64::MAX).min()
+    }
+
+    pub fn has_startable(&self, now: u64) -> bool {
+        !self.paused && now >= self.backoff_until && (self.next_leaf(now).is_some() || self.next_merge(now).is_some())
     }
 
     /// Whether every unbuilt leaf before message `m` has failed at least `times` times.
@@ -261,6 +294,9 @@ mod tests {
         }
         assert_eq!(s.failures(job), 4);
         s.failed(job, now);
+        assert_eq!(s.next(now + 1_000_000), None);
+        assert_eq!(s.next_retry(now), None);
+        assert!(!s.has_startable(now + 1_000_000));
         s.kick();
         assert_eq!(s.next(now), Some(job));
         s.built(job);

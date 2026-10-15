@@ -149,14 +149,19 @@ impl View {
         }
     }
 
+    /// Merge down to the low mark when over the high mark or in forced mode.
+    pub fn settle(&mut self, t: u64, sizes: &impl Sizes) -> Vec<(u32, u64)> {
+        if self.forced || self.total > self.high {
+            return self.shrink(t, sizes);
+        }
+        Vec::new()
+    }
+
     /// Append message `i`'s line and merge in a batch when the view is over its high mark, or
     /// keep merging when an earlier batch could not reach the low mark. Returns the parents merged.
     pub fn push_message(&mut self, i: u64, sizes: &impl Sizes) -> Vec<(u32, u64)> {
         self.push(0, i, sizes);
-        if self.forced || self.total > self.high {
-            return self.shrink(i + 1, sizes);
-        }
-        Vec::new()
+        self.settle(i + 1, sizes)
     }
 
     /// Merge down to the low mark now, entering forced mode when it cannot be reached.

@@ -54,7 +54,7 @@ enum Command {
         timeout_secs: u64,
         /// Append this many messages at a time and wait for their summaries before the next batch,
         /// as a live chat would; 0 appends everything at once
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 25)]
         pace: usize,
     },
     /// Send a message and print the reply (runs the turn itself when no server is running)
@@ -234,24 +234,41 @@ async fn import(profile: &str, file: &std::path::Path, timeout_secs: u64, pace: 
     let (_, engine) = open_engine(profile)?;
     let started = std::time::Instant::now();
     let before = engine.ledger().len();
+    let existing = engine.mem().log.len();
+    let mut seen = 0u64;
+    let remaining: Vec<&Imported> = items
+        .iter()
+        .filter(|m| {
+            let pages = if m.kind == log::Kind::Echo { 1 } else { log::paginate(&m.text).len() as u64 };
+            let keep = seen >= existing;
+            seen += pages;
+            keep
+        })
+        .collect();
     let pump = tokio::spawn(engine.clone().pump());
     let limit = std::time::Duration::from_secs(timeout_secs);
     let mut done = true;
-    for batch in items.chunks(if pace == 0 { items.len().max(1) } else { pace }) {
+    for batch in remaining.chunks(if pace == 0 { remaining.len().max(1) } else { pace }) {
         for m in batch {
             engine.mem().append_dated(m.kind, &m.text, None, &m.date)?;
         }
         engine.changed();
-        if pace > 0 && !engine.wait_idle(limit).await {
-            // A batch that does not finish (for example expired credentials) would make every
-            // later batch wait out the limit as well.
-            done = false;
-            break;
+        if pace > 0 {
+            if !engine.wait_idle(limit).await {
+                // A batch that does not finish (for example expired credentials) would make every
+                // later batch wait out the limit as well.
+                done = false;
+                break;
+            }
+            engine.mem().settle_views()?;
         }
     }
-    done &= engine.wait_idle(limit).await;
+    if done {
+        done = engine.wait_idle(limit).await;
+    }
     engine.stop();
     let _ = pump.await;
+    engine.mem().settle_views()?;
     engine.mem().save_views()?;
     let calls: Vec<_> = engine.ledger().into_iter().skip(before).collect();
     let sum = |f: fn(&tree::Usage) -> u64| calls.iter().filter_map(|c| c.usage.as_ref()).map(f).sum::<u64>();

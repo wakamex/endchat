@@ -194,6 +194,20 @@ impl Memory {
         Ok(())
     }
 
+    pub fn settle_views(&mut self) -> Result<()> {
+        let t = self.log.len();
+        let chat_merged = !self.chat.settle(t, &self.tree).is_empty();
+        let comp_merged = !self.comp.settle(t, &self.tree).is_empty();
+        let mut shrunk = false;
+        if chat_merged && !comp_merged {
+            shrunk = !self.comp.shrink(t, &self.tree).is_empty();
+        }
+        if chat_merged || comp_merged || shrunk {
+            self.save_views()?;
+        }
+        Ok(())
+    }
+
     /// Append a line to both views, merging them as their rules say.
     fn push_view(&mut self, i: u64) -> Result<()> {
         let chat_merged = !self.chat.push_message(i, &self.tree).is_empty();
@@ -222,11 +236,15 @@ impl Memory {
             self.sched.leaf_ready(p);
         }
         for m in &msgs {
-            let src = m.source();
-            if src.len() <= NODE_BYTES {
-                self.finish(Node::new(0, m.i, src), Job::Leaf(m.i))?;
+            if self.tree.is_built(0, m.i) {
+                self.settle_parent(0, m.i)?;
             } else {
-                self.sched.add_leaf(m.i, true);
+                let src = m.source();
+                if src.len() <= NODE_BYTES {
+                    self.finish(Node::new(0, m.i, src), Job::Leaf(m.i))?;
+                } else {
+                    self.sched.add_leaf(m.i, true);
+                }
             }
         }
         for m in &msgs {
@@ -248,12 +266,14 @@ impl Memory {
     fn settle_parent(&mut self, l: u32, i: u64) -> Result<()> {
         let (mut l, mut i) = (l, i);
         loop {
-            if !self.tree.is_built(l, i ^ 1) {
+            let sib = i ^ 1;
+            if ((sib + 1) << l) > self.log.len() || !self.tree.is_built(l, sib) {
                 return Ok(());
             }
             let (pl, pi) = (l + 1, i / 2);
             if self.tree.is_built(pl, pi) {
-                return Ok(());
+                (l, i) = (pl, pi);
+                continue;
             }
             let a = self.tree.get(l, pi * 2)?.expect("built").text;
             let b = self.tree.get(l, pi * 2 + 1)?.expect("built").text;
