@@ -1,144 +1,114 @@
-# Zoom compared with two search tools for reading original messages
+# How a never-ending chat should read its own history
 
-endchat shows the model one-line summaries of the chat and lets it read the original messages through `zoom`, which opens a summary line into the lines or the message beneath it. This evaluation asks whether a search tool finds the messages that hold an answer more often than zoom does, and what each costs per turn.
+endchat keeps a chat that never ends by sending the model a view of one-line summaries of the whole history, and lets it open any summary into the original messages with `zoom`. This evaluation asks whether that is the right way to give the model its past: how often each design finds what a question needs, and what each costs per turn.
 
-With zoom switched off and a search tool in its place, the model answered 116 of 133 questions correctly with either of two search tools, against 108 with zoom. Both search tools were called on more turns than zoom and returned about twice the share of the messages that hold the answer. They cost 4 to 13 points more per turn than zoom at Claude Opus 5.5 prices.
+The short answer: letting the model search the original messages beats drilling down through summaries, a plain regular-expression search does as well as an embedding model, and the cost that decides between designs is what every turn pays for the view, not what a lookup pays. With 10 runs of each design on the same 133 questions, summaries plus a search tool answered about 114 to 115 correctly, endchat's own zoom about 109, and summaries alone about 100. Sending the whole history in the prompt scored the same as summaries plus search, at about four times the cost per turn.
 
-The test used the 133 multi-session questions of [LongMemEval](https://github.com/xiaowu0162/LongMemEval), each asked once against the same imported chat of about 490 messages, with Claude Sonnet 5.5 as the turn model and the same judge for all three runs.
+Each design answered the 133 multi-session questions of [LongMemEval](https://github.com/xiaowu0162/LongMemEval), each asked against the same imported chat of about 490 messages, with Claude Sonnet 5.5 answering, through the [Agent Orchestration Process (AOP)](https://github.com/wakamex/agent-orchestration-process).
 
-## The three tools
+![Recall questions correct against the cost of a turn that needs recall](recall_turn.png)
 
-- zoom: `zoom(id, n)` opens a summary line into the two lines it was made from, and `zoom(id, 1)` gives one message whole. The model navigates by the ids shown in its view.
-- search: `search("QUERY")` ranks every original message by relevance to a query in plain words and returns the 10 best whole. The ranker is [ColBERT-Zero](https://huggingface.co/lightonai/ColBERT-Zero), an embedding model that stores one vector per token, run locally with its query and document prompts.
-- sch: `sch PATTERN` is a regular-expression search over the original messages, run by [search-clanker-history (sch)](https://github.com/wakamex/search-clanker-history) itself. By default it prints 200 characters around each match.
+![Recall questions correct against the cost of an average turn](average_turn.png)
+
+## The designs compared
+
+Every design except the last two keeps endchat's view, about 32,000 tokens of summaries, and differs only in how the model reaches the original messages:
+
+- no tool: the view alone
+- zoom: endchat as it ships
+- sch: [search-clanker-history (sch)](https://github.com/wakamex/search-clanker-history), a regular-expression search over the raw log that prints 200 characters around each match
+- search: the 10 messages ranked best for a query in plain words by [ColBERT-Zero](https://huggingface.co/lightonai/ColBERT-Zero), an embedding model run locally; with Haiku reads results, Claude Haiku 5.5 condenses those 10 messages to the passages that bear on the question
+- Haiku scouts: Haiku takes the turn first with one tool (zoom, sch or search) and reports quotes, and the main model answers in a single call without tools
+- sch, small view: the view cut to about 4,000 tokens by endchat's view limits
+- sch, no view: no view at all, so the chat is reachable only through sch, as in a fresh coding-agent session
+- whole history in context: the full chat, about 165,000 tokens, in one call, without endchat
 
 ## Results
 
-Each column is one run over the same 133 questions. Evidence means the turns LongMemEval marks as holding the answer; 125 of the 133 questions have them, and the other 8 are among the questions whose correct answer is that the chat does not say.
+The first column is questions correct out of 133, averaged over 10 runs (6 for the whole history), with its 95% interval. The next two are cost per turn at Claude Opus 5.5 prices: a turn that needs recall, and an average turn, of which 3.6% need recall.
 
-| Measure | zoom | search, zoom off | sch, zoom off |
-|---|---|---|---|
-| Questions judged correct, of 133 | 108 (81.2%) | 116 (87.2%) | 116 (87.2%) |
-| Turns in which the model called the tool | 87 (65%) | 115 (86%) | 117 (88%) |
-| Tool calls per turn | not counted | 2.03 | 1.35 |
-| Model calls per turn | 1.85 | 1.89 | 2.07 |
-| Share of evidence the tool returned, over the 125 questions | 0.40 | 0.81 | 0.78 |
-| Share of evidence the tool returned, over turns that called it | 0.63 | 0.95 | 0.90 |
-| Distinct messages returned per turn | 1.9 | 12.4 | 14.7 |
-| Correct among turns that called the tool | 68 of 87 | 100 of 115 | 101 of 117 |
-| Correct among turns that did not | 40 of 46 | 16 of 18 | 15 of 16 |
-
-Question by question, search was right where zoom was wrong 13 times and wrong where zoom was right 5 times. For sch the counts are 12 and 4. An exact sign test on those pairs gives p = 0.10 for search and p = 0.08 for sch, so the gain in correct answers is likely but not established at this sample size. Search and sch disagree with each other on 12 questions, 6 each way.
-
-The gain in evidence returned is large in both cases. Zoom opened 1.9 messages per turn and reached 0.40 of the evidence. The search tools returned 12 to 15 messages per turn and reached about 0.8.
-
-## Did low zoom rate hurt results?
-
-Only slightly. The model zoomed on 65% of turns and searched on 86% to 88%, under instructions of the same strength, but the turns where it skipped zoom are not where zoom lost. The table splits the 125 questions that have evidence by what happened on zoom's turn, and shows how many each tool answered correctly in that group.
-
-| Zoom's turn | Questions | zoom correct | search correct | sch correct |
+| Design | Correct, of 133 | 95% interval | Cost of a recall turn | Cost of an average turn |
 |---|---|---|---|---|
-| Did not zoom | 46 | 40 | 43 | 41 |
-| Zoomed and reached part or none of the evidence | 47 | 33 | 39 | 41 |
-| Zoomed and reached all the evidence | 32 | 31 | 31 | 29 |
+| search, Haiku reads results | 115.5 | 114.0 to 117.0 | $0.063 | $0.038 |
+| sch | 113.9 | 112.4 to 115.4 | $0.069 | $0.038 |
+| whole history in context | 113.3 | 112.0 to 114.7 | $0.154 | $0.154 |
+| sch, small view | 110.5 | 108.9 to 112.0 | $0.054 | $0.016 |
+| zoom | 108.8 | 107.4 to 110.2 | $0.058 | $0.038 |
+| sch, no view | 108.8 | 107.4 to 110.2 | $0.064 | $0.012 |
+| Haiku scouts with search | 108.8 | 107.0 to 110.6 | $0.041 | $0.038 |
+| Haiku scouts with sch | 107.3 | 105.5 to 109.1 | $0.039 | $0.037 |
+| Haiku scouts with zoom | 100.7 | 98.9 to 102.5 | $0.038 | $0.037 |
+| no tool | 99.7 | 98.5 to 100.9 | $0.037 | $0.037 |
 
-- On the turns without a zoom the model was right 40 times of 46 from the summaries alone. Zooming on every one of them and doing as well as search would add 3 correct answers.
-- Most of the gap is in the second row. Zoom was used and missed evidence on 47 turns, which cost it 6 to 8 questions against the search tools. The model opened about 3 messages on a turn that zoomed, although the prompt tells it to open every line that could touch the subject.
-- When zoom reached all the evidence it was right 97% of the time, against 93% for search and 88% for sch on their own turns that returned all the evidence. Zoom read 3.8 messages on those turns and search returned 14.5.
+Paired by question, the comparisons between neighbors in score that the runs settle are: the whole history is equivalent to sch (within 3 questions either way) and better than the small view; sch without a view, zoom and the search scout are equivalent to each other; the sch scout beats the zoom scout. The Haiku reader against sch, the small view against no view, and the zoom scout against no tool remain within noise.
 
-So zoom's shortfall is coverage on the turns that use it, and its strength is precision. Whether a stronger prompt can raise coverage depends on something this evaluation did not measure: how often the summary line covering an evidence message still shows the fact. Evidence here is usually a short user message that mentions a fact in passing, and a line that merges 4 or 8 messages may drop it. Where it does, no instruction tells the model which line to open, and wider opening costs one more call that rereads the view for each round.
+## Why these quantities
 
-## Cost per turn
+### Questions that need the history
 
-Token counts are the ones the Sonnet runs reported. They are priced here at Claude Opus 5.5 rates per million tokens: $4 for input, $20 for output, and $0.20 for a cache read plus the $1 premium paid when that prefix was written to the cache. The increase is measured against one call that sends the view and nothing else, which costs $0.140.
+The test is a question whose answer lies in earlier messages, often in several of them: "how many weddings have I attended this year". That is the one job the view and its tools exist for, so the score is the share of such questions answered correctly, judged by the strict LongMemEval prompt with gemini-3.8-flash. Questions that need only the current message would score every design the same.
 
-| Measure, mean per turn | zoom | search, zoom off | sch, zoom off |
-|---|---|---|---|
-| Fresh input tokens | 32,800 | 38,400 | 33,400 |
-| Cache-read tokens | 31,500 | 31,900 | 37,700 |
-| Output tokens | 402 | 148 | 149 |
-| Cost | $0.177 | $0.195 | $0.182 |
-| Increase over a view-only call | 26% | 39% | 30% |
+### Evidence found, alongside answers
 
-Most of every figure is the view, about 33,000 tokens sent with each call. A tool's cost is the second call that rereads the view from the cache, plus what the tool returned. Search returns whole messages, about 10,800 characters per call. sch returns snippets, with a median of 2,300 characters per call, which is why it adds little fresh input.
+LongMemEval marks the messages that hold each answer. Counting how many of them a tool returned separates two failures that a wrong answer conflates: the tool never showed the evidence, or the model had it and still answered wrongly. It also needs no judge.
 
-## How the model used each tool
+### Cost per turn, with the prompt cache as it is really used
 
-Search queries averaged 37 characters and read as short descriptions of what a message would say, such as "bought vinyl album" or "antique vanity worth at least how much". The model usually split a question into two or three searches: 37 turns made two calls and 33 made three.
+Cost is in dollars per turn, priced at Opus 5.5 rates, the model endchat would run in daily use. Token counts come from the Sonnet runs, so the figures assume Opus would read and write about as many tokens. Every call goes through the one-hour [prompt cache](https://docs.claude.com/en/docs/build-with-claude/prompt-caching): input not yet cached is written at twice the input price and read back later at a twentieth of it. Whether a turn finds the view cached decides most of its cost, so each turn is priced at the measured share of my own prompts that found the cache warm, 92% (91% to 93%).
 
-Run with the question itself as the single query, the same ranker puts 0.90 of the evidence in its first 10 messages. With the model's own queries it returned 0.95 on the turns that called it, because several narrower searches cover more than one broad one.
+### An average turn, not only a recall turn
 
-sch patterns were alternations of likely words, such as `"taxi|train|\$10|\$60"` or `"neon tetras|pleco|betta|Bubbles"`. Of 179 calls, 101 used `-t user` and 56 used `-C 0` to print whole messages. None used `-A`, `-B`, or `-t assistant`. Twelve calls matched nothing, and one broad pattern produced 150,794 characters, which endchat cuts to 30,000.
+Each benchmark question is a turn that needs the history, but in real use most turns do not. From 30 days of my Claude Code and Codex logs, 3.6% of turns (3.2% to 4.1%) ran sch or read a past session's log. The second chart prices an average turn: 3.6% of turns cost what the design's recall runs cost, and the rest cost one call over the view with no tool. That assumes no design calls its tool on an ordinary turn, which these runs do not test.
 
-In none of the turns that skipped the tool did the reply hold a call that endchat failed to read.
+### Ten runs per design
 
-## The ranker behind search, on questions it was not chosen on
+The same design on the same questions gives a different score each run: two runs disagree on 7 to 20 of the 133 questions, and the judge alone flips about 3. One run per design cannot separate designs a few questions apart, so each design ran 10 times (the whole history stopped at 6, once its comparison with each neighbor was settled). Intervals come from resampling a design's runs separately for each question, which measures how well its average on these questions is pinned down.
 
-ColBERT-Zero was picked for search because it returned the most evidence of nine rankers on the 133 multi-session questions, the same questions the runs above use. To check that pick, five local rankers were scored on four other LongMemEval question types, 324 questions with evidence turns, which played no part in the choice: questions about what the user said, what the assistant said, facts that changed over time, and the order or timing of events. The 30 preference questions are left out, since they ask for a recommendation and test whether a request recalls an unstated taste.
+### Clouds and the frontier
 
-Each cell is the share of evidence turns among the first N messages a ranker returns for the question as written. Higher is better.
+Each chart draws every design as 3,000 bootstrap draws of its accuracy and cost, with cost drawn over its runs, the warm share and, on the second chart, the recall rate. The figure beside each name is the share of draws in which the design is on the efficient frontier, where no other design is cheaper and at least as accurate. It says how often a design is worth choosing given the uncertainty, which a single frontier line cannot.
 
-| Ranker | First 1 | First 2 | First 5 | First 10 | First 50 |
-|---|---|---|---|---|---|
-| ColBERT-Zero, with its query and document prompts | 0.511 | 0.688 | 0.871 | 0.943 | 0.986 |
-| ColBERT-Zero, prompts omitted | 0.482 | 0.680 | 0.856 | 0.927 | 0.987 |
-| [LateOn](https://huggingface.co/lightonai/LateOn) | 0.411 | 0.588 | 0.793 | 0.917 | 0.984 |
-| [EmbeddingGemma 2](https://ai.google.dev/gemma/docs/embeddinggemma/model_card_2), text only | 0.393 | 0.581 | 0.803 | 0.903 | 0.989 |
-| [DenseOn](https://huggingface.co/lightonai/DenseOn) | 0.377 | 0.550 | 0.731 | 0.866 | 0.980 |
+### Reworded questions
 
-ColBERT-Zero with its prompts leads at every size up to 10 messages, and on each of the four types separately ColBERT-Zero is ahead of the other three rankers, so the choice does not depend on the questions it was made on. sch involved no such choice and reached the same 116 correct.
+The benchmark's questions repeat the words of their evidence, which suits a regular expression. A second set of the same 125 questions, rewritten by Claude Sonnet to share no content word with the messages that answer them, tests whether sch survives a question asked in other words. On it the model answers 110 correctly when handed the evidence directly, against 116 for the originals, so the rewording costs about 6 questions before any tool is involved.
 
-ColBERT-Zero embeds the first 519 tokens of a message as shipped. Raising that setting to 8,192 leaves these rankings unchanged (0.901 and 0.903 at 10 messages on the multi-session questions) and lets a query match text anywhere in a long message: for 184 sentences taken from past token 600 of long messages, the source message ranked first 49% of the time at 519 tokens and 93% at 8,192.
+### Ranker chosen on other questions
 
-## Method
+ColBERT-Zero was the best of nine rankers at returning evidence on these 133 questions. On four other LongMemEval question types, 324 questions not used to choose it, it was still the best, by 7 to 10 points at 5 messages.
 
-Each question's chat had been imported into endchat and summarized for the zoom run. For the two search runs, a copy of each profile was cut back to the messages before the question, with the tree nodes and view lines that covered later messages removed. In 131 of 133 profiles the model saw the exact view the zoom run saw. In the other 2, the question's turn had merged view lines across the cut, and endchat rebuilt the view from the log.
+## Takeaways
 
-The turn model was Claude Sonnet 5.5 at medium effort in every run. Answers were scored by the strict LongMemEval judge prompt with gemini-3.8-flash.
+### Searching the raw messages beats drilling through summaries
 
-A message counts as returned when the tool printed it. For zoom that is a message opened whole with `zoom(id, 1)`. For sch it includes messages shown only as a snippet.
+A summary line keeps a topic and drops what the summarizer thought minor, so zoom can only open what a line points to. On single runs, zoom reached 0.40 of the evidence messages and the search tools about 0.8. When zoom did reach everything it was the most precise design, right 97% of the time on about 4 messages, but it reached everything on 32 of 125 questions. Offered both, the model almost never zooms after searching.
 
-The search runs used a build of endchat with three additions that are not in this repository's configuration: text tools that run a configured command, a switch that turns `zoom` and `date` off, and a system prompt read from a file. The harness and both tool commands are in the longmem repository: `eval_endchat_tools.py`, `search_server.py`, `search_tool.py`, `sch_tool.py`, and `compare_tools.py`, which prints the result and cost tables. `embed_rank.py` there produces the rankings for the held-out comparison.
+### A regular expression matches an embedding model here
 
-## Prompt changes
+sch and ColBERT search score the same. On reworded questions, sch with the view scored 106.6 and the view-free version 103.4: the model reads the chat's own vocabulary off the view and writes its patterns from that, so the question's wording barely reaches the tool. With the reworded question itself as the query, ColBERT still ranks 0.71 of the evidence in its top 10 and a plain keyword match ranks none. The embedding model needs a GPU and an index that grows with the history; sch needs neither.
 
-The zoom run used `prompts/system.md` as it stands. Each search run replaced the tool list and reworded the passages that tell the model to zoom, at the same strength, so that the tool is the only difference between runs.
+### What the tool returns matters more than how it finds it
 
-Tool entry for search:
+Whole messages returned by search averaged 10,800 characters a call, mostly long assistant replies around a fact mentioned in passing by the user. Having Haiku condense them to quotes cut that to about 450 characters and kept the score. Cutting each long message to the sentences that best match the query kept only 41% of the answer's words, because the answer usually sits in the sentence beside the match; adding one sentence on each side kept 90%.
 
-```
-- search("QUERY") ranks the original messages of this chat by how well they answer QUERY and
-  gives the 10 best whole, each with its id, date and kind (QUERY is plain words, such as a
-  question or what the message would say; not keywords, not a regex)
-```
+### Delegating the lookup to a cheaper model loses accuracy
 
-Tool entry for sch:
+A Haiku scout saves the main model's second call but passes on only what it chose to quote, and scores about 6 questions below the designs where the main model searches. With zoom as its tool the scout barely beats no tool. Once recall turns are rare, its saving disappears and its Haiku call on every turn remains.
 
-```
-- sch PATTERN searches the original messages of this chat (regex, case-insensitive;
-  `-t user|assistant` limits it to the user's messages or yours, `-A/-B N` context messages,
-  `-n N` for only the N most recent matches, `-C CHARS` text shown around each match
-  (default 200, 0 for the whole message), `--since`/`--until` with ISO dates). Each result
-  header gives the message's date.
-```
+### The view is the cost; lookups are nearly free
 
-The paragraph that requires reading originals before answering, as worded for search (the sch version says "sch calls" and "other patterns"):
+Every design with the full view pays for about 32,000 tokens on every turn. At a 3.6% recall rate the lookup's own cost shrinks to a tenth of a cent, and all full-view designs cost about $0.038 per average turn. The one lever left is the size of the view: cutting it to about 4,000 tokens costs about 3 questions and brings an average turn under half the cost, and dropping it costs about 5 questions and leaves a turn at about a third of the cost.
 
-```
-Your first reply to such a question is search calls and
-nothing else: one search for each thing the question could turn on. Answer only after
-you have read the messages themselves. For a total, a count, a difference or a "how many",
-there may be many separate mentions: find them all, list each in your reply with its
-value, then combine. If the messages you read lack the answer, search again in other words
-before you say you don't know. Before you answer, scan the view once more for subjects you
-did not search that could hold another mention, and search them.
-```
+### The whole history in context is no better and costs four times as much
 
-The note sent with every user message changed from "Zoom to the original messages before you answer anything about the chat" to "Search the original messages before you answer anything about the chat".
+At about 165,000 tokens these chats fit easily in the context window, and sending all of it scored the same as summaries plus sch. Even with the cache warm, rereading the whole history on every turn costs about four times as much as a 32,000-token view, and the gap grows with the history until it no longer fits.
 
 ## Limits
 
-- These questions share words with the messages that answer them, which suits a regular expression. A question about something half-remembered, phrased differently from the original, may suit sch less and the embedding search more. This benchmark does not separate the two.
-- No run offered zoom and a search tool together, so the results say nothing about whether zoom adds anything once search exists.
-- Every question asks about the chat's past. In ordinary use most turns do not, and how often the model would call each tool then was not measured.
-- Output tokens come from Sonnet at medium effort. Opus 5.5 cannot turn thinking off and would produce more.
+- The view also carries the recent conversation, which ordinary turns depend on ("make it shorter", "do the same for the other file"). The benchmark scores only recall, so what the small view and no view lose on ordinary turns is not measured. The per-turn chart assumes nothing.
+- Each chat is about 490 messages of synthetic conversation. Longer histories favor designs that do not send everything, and real chats differ in how often facts recur.
+- The recall rate comes from one person's coding-agent use, where the current session stays in context, and may not match a chat that never ends.
+- Answers come from Sonnet and costs from Opus prices; Opus would likely think longer and score somewhat higher.
+
+## Reproducing
+
+endchat's experimental options for these runs (text tools, switching zoom or the view off, a replaceable system prompt) are in `src/profile.rs`, `src/turn.rs` and `src/engine.rs`. The harness is in the longmem repository: `eval_endchat_tools.py` runs an arm, `replicate_arms.py` repeats it and `replicates.py` compares arms, `plot_tool_arms_cloud.py` draws the charts, `warm_share.py` and `recall_rate.py` measure the warm share and the recall rate from session logs, and `reword_questions.py` builds the reworded set. Prompts for every arm are under `prompts/` there.
