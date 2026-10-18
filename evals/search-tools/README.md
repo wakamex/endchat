@@ -6,7 +6,11 @@ The short answer: letting the model search the original messages beats drilling 
 
 Each design answered the multi-session questions of [LongMemEval](https://github.com/xiaowu0162/LongMemEval), each asked against the same imported chat of a few hundred messages, ten times over, with Claude Sonnet 5.5 answering through the [Agent Orchestration Process (AOP)](https://github.com/wakamex/agent-orchestration-process).
 
+The first chart compares the designs on the turns the benchmark asks about, those that need the chat's history. Each cloud shows where a design's accuracy and cost could plausibly lie, and the figure beside its name is how often it is on the efficient frontier, where no other design is both cheaper and at least as accurate.
+
 ![Recall questions correct against the cost of a turn that needs recall](recall_turn.png)
+
+Most real turns need no history at all: in my own coding-agent use about one turn in thirty looks anything up. The second chart keeps the same accuracy but prices an average turn at that rate, so a lookup's cost is paid only now and then, while carrying the view is paid on every turn. That moves the designs that send a smaller view, or none, far to the left.
 
 ![Recall questions correct against the cost of an average turn](average_turn.png)
 
