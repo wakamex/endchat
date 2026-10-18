@@ -25,7 +25,7 @@ All but the last two keep endchat's view of summaries and differ only in how the
 
 ## Results
 
-Questions correct out of 133, averaged over 10 runs (6 for the whole history) with a 95% interval, and cost per turn at Claude Opus 5.5 prices for a turn that needs recall and for an average turn.
+Questions correct out of 133, averaged over 10 runs (6 for the whole history) with a 95% interval, and cost per turn at Claude Opus 5.5 prices: for a turn that needs recall, and for an average turn, of which about one in thirty needs recall.
 
 | Design | Correct, of 133 | 95% interval | Cost of a recall turn | Cost of an average turn |
 |---|---|---|---|---|
