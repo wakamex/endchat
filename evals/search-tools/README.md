@@ -14,6 +14,8 @@ Most real turns need no history at all: in my own coding-agent use about one tur
 
 ![Recall questions correct against the cost of an average turn](average_turn.png)
 
+Counting every turn changes which designs are worth choosing, while their accuracy stays where it was. On recall turns alone, the designs that save the main model work look cheapest: a Haiku scout answers in one main call, and a Haiku reader keeps search results short. Over every turn, those savings shrink to almost nothing, because they apply only on the rare turn that looks something up, while the scout's extra Haiku call is paid on every turn. All designs that carry the full view then cost about the same, and the choice among them comes down to accuracy, where the main model searching for itself leads. The designs that carry a smaller view, or none, become the cheapest by far, because carrying the view is the cost every turn pays. The whole history in context stays the most expensive on both charts, since every one of its turns rereads everything.
+
 ## The designs compared
 
 All but the last two keep endchat's view of summaries and differ only in how the model reaches the original messages:
