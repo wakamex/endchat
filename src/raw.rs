@@ -2,8 +2,9 @@
 //!
 //! Tool results longer than `stub_chars` are replaced by a one-line stub once they are older than
 //! the previous turn, and when the raw part passes `high` bytes its oldest messages are cut down to
-//! the chat view's summary lines until it is under `low`. The cut is kept in `raw.json`, so every
-//! turn until the next cut sends the same prefix.
+//! the chat view's summary lines until it is under `low`. The cut and the summary lines as rendered
+//! then are kept in `raw.json`, so every turn until the next cut sends the same prefix, however the
+//! view changes meanwhile.
 //!
 //! Each turn is one cache block, and the mark sits on the last block before the previous turn: that
 //! part never changes again, while the previous turn's results are stubbed on the next turn. The
@@ -13,6 +14,7 @@ use crate::error::Result;
 use crate::log::{Kind, Message};
 use crate::memory::{Memory, Prompt};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fs;
 
 pub struct Limits {
@@ -23,7 +25,11 @@ pub struct Limits {
 
 #[derive(Default, Serialize, Deserialize)]
 struct Saved {
+    /// The first message sent word for word.
     cut: u64,
+    /// The view lines covering the messages before `cut`, rendered when the cut was made.
+    #[serde(default)]
+    summary: String,
 }
 
 /// Written so the model takes the `agent` entries as its own replies and keeps to their rules and
@@ -39,10 +45,33 @@ const ZOOM_NOTE: &str = " To read the messages under a line, write `zoom(id, n)`
 fn entry(m: &Message, call: Option<&Message>, stub: bool, lim: &Limits) -> String {
     let chars = m.text.chars().count();
     if stub && m.kind == Kind::Echo && chars > lim.stub_chars {
-        let tool = call.and_then(|c| c.text.split_whitespace().next()).unwrap_or("the call");
-        return format!("{}|echo: [stub: {chars} characters returned by {tool} in message {}]\n", m.i, call.map_or(m.i.saturating_sub(1), |c| c.i));
+        return match call {
+            Some(c) => format!("{}|echo: [stub: {chars} characters returned by {} in message {}]\n", m.i, c.text.split_whitespace().next().unwrap_or("the call"), c.i),
+            None => format!("{}|echo: [stub: {chars} characters returned by an earlier call]\n", m.i),
+        };
     }
     format!("{}|{}: {}\n", m.i, m.kind.as_str(), m.text)
+}
+
+/// The call each result answers. Results come back in the order of their calls, so with parallel
+/// calls the first result after them belongs to the first call.
+fn calls(msgs: &[Message]) -> Vec<Option<usize>> {
+    let mut pending = VecDeque::new();
+    msgs.iter()
+        .enumerate()
+        .map(|(k, m)| match m.kind {
+            Kind::Tool => {
+                pending.push_back(k);
+                None
+            }
+            Kind::Echo => pending.pop_front(),
+            Kind::User => {
+                pending.clear();
+                None
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Messages from `from` on, with each page run joined into its first message.
@@ -60,52 +89,48 @@ fn messages(mem: &mut Memory, from: u64) -> Result<Vec<Message>> {
     Ok(out)
 }
 
-/// The first message a summary does not cover: the end of the last view line that starts before `cut`.
-fn summary_end(mem: &Memory, cut: u64) -> (usize, u64) {
-    let lines = mem.chat.lines();
-    let n = lines.partition_point(|l| l.id() < cut);
-    (n, if n == 0 { 0 } else { lines[n - 1].end().max(cut) })
-}
-
 pub fn prompt(mem: &mut Memory, lim: &Limits, zoom: bool, tail: &str) -> Result<Prompt> {
     let path = mem.dir.join("raw.json");
     let mut saved: Saved = fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     loop {
-        let (lines, start) = summary_end(mem, saved.cut);
-        let msgs = messages(mem, start)?;
-        // A turn starts at each message the user sent, as opposed to one delivered during a run.
+        let msgs = messages(mem, saved.cut)?;
+        // A turn starts at each message the user sent; one delivered during a run carries that run.
         let turns: Vec<usize> = (0..msgs.len()).filter(|&k| msgs[k].kind == Kind::User && msgs[k].run.is_none()).collect();
         let prev = turns.last().copied().unwrap_or(0);
-        let entries: Vec<String> = (0..msgs.len()).map(|k| entry(&msgs[k], k.checked_sub(1).map(|j| &msgs[j]).filter(|c| c.kind == Kind::Tool), k < prev, lim)).collect();
+        let calls = calls(&msgs);
+        let entries: Vec<String> = (0..msgs.len()).map(|k| entry(&msgs[k], calls[k].map(|c| &msgs[c]), k < prev, lim)).collect();
         let bytes: usize = entries.iter().map(String::len).sum();
         if bytes > lim.high {
-            // Cut at the first view line boundary that leaves at most `low` bytes, and never into the previous turn.
+            // Cut at the first view line boundary that leaves at most `low` bytes, or failing that at
+            // the last one before the previous turn, which is never cut into.
             let mut left = bytes;
             let mut cut = None;
             for (k, e) in entries.iter().enumerate().take(prev) {
                 left -= e.len();
                 let next = msgs[k + 1].i;
-                let boundary = mem.chat.lines().iter().any(|l| l.end() == next);
-                if boundary && left <= lim.low {
+                if mem.chat.lines().iter().any(|l| l.end() == next) {
                     cut = Some(next);
-                    break;
+                    if left <= lim.low {
+                        break;
+                    }
                 }
             }
-            if let Some(c) = cut.filter(|&c| c > saved.cut) {
-                saved.cut = c;
+            if let Some(c) = cut {
+                // The view lines tile the log, so those ending by `c` cover exactly the messages before it.
+                let lines: Vec<_> = mem.chat.lines().iter().filter(|l| l.end() <= c).copied().collect();
+                saved = Saved { cut: c, summary: mem.render(&lines)? };
                 fs::write(&path, serde_json::to_string(&saved)?)?;
                 continue;
             }
         }
         let mut head = INTRO.to_owned();
-        if lines > 0 {
+        if !saved.summary.is_empty() {
             head += SUMMARY_NOTE;
             if zoom {
                 head += ZOOM_NOTE;
             }
             head += "\n<summary>\n";
-            let shown = mem.chat.lines()[..lines].to_vec();
-            head += &mem.render(&shown)?;
+            head += &saved.summary;
             head += "</summary>\n";
         }
         let mut parts = vec![(head, false)];
@@ -127,7 +152,7 @@ pub fn prompt(mem: &mut Memory, lim: &Limits, zoom: bool, tail: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::tests::{limits, long};
+    use crate::memory::tests::{limits, long, stub_finish};
 
     fn mem(dir: &std::path::Path) -> Memory {
         Memory::open(dir, &limits(), 2).unwrap()
@@ -192,9 +217,47 @@ mod tests {
         assert!(raw.len() <= 31_000 && raw.contains("79|agent"), "{}", raw.len());
         let cut: Saved = serde_json::from_str(&fs::read_to_string(d.path().join("raw.json")).unwrap()).unwrap();
         assert!(cut.cut > 0);
+        // Summaries finishing and the view merging change the view, but not the summary sent.
+        while let Some(job) = m.sched.next(0) {
+            stub_finish(&mut m, job, 200);
+        }
         m.append(Kind::User, "one more", None).unwrap();
         let again = prompt(&mut m, &lim, true, "now").unwrap();
+        assert_ne!(m.render(&m.chat.lines().to_vec()).unwrap(), text[text.find("<summary>\n").unwrap() + 10..text.find("</summary>").unwrap()]);
         assert_eq!(again.0[0], p.0[0], "the summary block is the same until the next cut");
+    }
+
+    #[test]
+    fn parallel_results_are_stubbed_with_their_own_calls() {
+        let d = tempfile::tempdir().unwrap();
+        let mut m = mem(d.path());
+        m.append(Kind::User, "go", None).unwrap();
+        m.append(Kind::Tool, "Read {}", Some("r")).unwrap();
+        m.append(Kind::Tool, "Bash {}", Some("r")).unwrap();
+        m.append(Kind::Echo, &"a".repeat(60), Some("r")).unwrap();
+        m.append(Kind::Echo, &"b".repeat(70), Some("r")).unwrap();
+        m.append(Kind::User, "while you work", Some("r")).unwrap();
+        turn(&mut m, "next", "short");
+        let text = prompt(&mut m, &LIM, true, "t").unwrap().text();
+        assert!(text.contains("3|echo: [stub: 60 characters returned by Read in message 1]"), "{text}");
+        assert!(text.contains("4|echo: [stub: 70 characters returned by Bash in message 2]"));
+    }
+
+    #[test]
+    fn a_previous_turn_larger_than_low_still_cuts_before_it() {
+        let d = tempfile::tempdir().unwrap();
+        let mut m = mem(d.path());
+        for k in 0..20 {
+            m.append(Kind::User, &format!("question {k}"), None).unwrap();
+            m.append(Kind::Agent, &long(1000), Some("r")).unwrap();
+        }
+        m.append(Kind::User, "big", None).unwrap();
+        for _ in 0..10 {
+            m.append(Kind::Agent, &long(1000), Some("r")).unwrap();
+        }
+        let lim = Limits { stub_chars: 1000, high: 60_000, low: 10_000 };
+        let text = prompt(&mut m, &lim, true, "now").unwrap().text();
+        assert!(text.contains("<summary>") && text.contains("40|user: big"), "{}", &text[..300]);
     }
 
     #[test]
