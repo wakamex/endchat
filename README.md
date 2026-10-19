@@ -62,7 +62,7 @@ view = true          # send the chat view with each message; false sends the mes
 # tail_note = "..."  # replaces the note sent with every message
 raw = false          # send the chat word for word instead of the view (see Raw history below)
 stub_chars = 1000    # with raw: longer tool results are stubbed once older than the previous turn
-native = false       # run turns as plain Claude Code in workdir: its own system prompt, CLAUDE.md, memory, skills, tools and sessions; needs profile = "host"
+native = false       # run turns as plain Claude Code in workdir: its own system prompt, CLAUDE.md, memory, skills, tools and sessions; needs profile = "host" and workdir, and no_web = false for Bash and web tools
 watch_units = false  # tell the chat when a systemd unit its tools started stops
 
 [turn.commands]      # extra text tools: a reply line `name(ARG)` or `name ARG` runs `program PROFILE_DIR ARG`

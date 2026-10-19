@@ -35,14 +35,20 @@ def main():
         seen.add(r.get("uuid"))
         date = r["timestamp"]
         content = m.get("content")
+        kind = "agent" if r["type"] == "assistant" else "user"
         if isinstance(content, str):
             if content.strip() and not content.lstrip().startswith(SKIP):
-                out.append({"kind": "user", "text": content, "date": date})
+                out.append({"kind": kind, "text": content, "date": date})
             continue
+        # Text beside tool results is the harness's own (reminders, hook output), not a message the
+        # user sent; as a user message it would also start a turn in the middle of one.
+        results = any(b.get("type") == "tool_result" for b in content or [])
         for b in content or []:
             t = b.get("type")
+            if t == "text" and kind == "user" and results:
+                continue
             if t == "text" and b.get("text", "").strip() and not b["text"].lstrip().startswith(SKIP):
-                out.append({"kind": "agent" if r["type"] == "assistant" else "user", "text": b["text"], "date": date})
+                out.append({"kind": kind, "text": b["text"], "date": date})
             elif t == "tool_use":
                 out.append({"kind": "tool", "text": f"{b.get('name')} {json.dumps(b.get('input'), separators=(',', ':'), ensure_ascii=False)}", "date": date})
             elif t == "tool_result":

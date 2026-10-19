@@ -152,8 +152,8 @@ impl Config {
         if cfg.turn.profile == "host" && !cfg.turn.allow_host {
             return msg("turn.profile = \"host\" needs turn.allow_host = true");
         }
-        if cfg.turn.native && cfg.turn.profile != "host" {
-            return msg("turn.native = true needs turn.profile = \"host\"");
+        if cfg.turn.native && (cfg.turn.profile != "host" || cfg.turn.workdir.is_none()) {
+            return msg("turn.native = true needs turn.profile = \"host\" and a turn.workdir");
         }
         if cfg.compactor.workers == 0 || cfg.limits.view_low >= cfg.limits.view_high || cfg.limits.compaction_low >= cfg.limits.compaction_high || cfg.limits.raw_low >= cfg.limits.raw_high {
             return msg("config: workers must be positive and each low mark below its high mark");
