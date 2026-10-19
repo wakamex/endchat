@@ -161,6 +161,18 @@ impl Engine {
         }
     }
 
+    /// The summary of the part of a raw history being cut, or None (and the error noted) when the
+    /// call fails, in which case the cut waits for the next turn.
+    pub async fn summarize_cut(&self, chat: &str) -> Option<String> {
+        let (out, calls) = self.compactor.summarize(chat, self.cfg.compactor.timeout.max(900)).await;
+        self.record_calls("cut", &calls);
+        out.map_err(|e| {
+            eprintln!("endchat: the summary for a raw-history cut failed: {e}");
+            self.set_error(format!("cut summary failed: {e}"));
+        })
+        .ok()
+    }
+
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
@@ -226,6 +238,9 @@ impl Engine {
     /// Start compactions as the scheduler releases them, until `stop`. The first call on a cold
     /// prefix goes alone; the others in its burst wait until it has answered.
     pub async fn pump(self: Arc<Self>) {
+        if !self.cfg.compactor.tree {
+            return;
+        }
         let mut rx = self.subscribe();
         while !self.stop.load(Ordering::SeqCst) {
             let (jobs, retry) = {
@@ -322,6 +337,9 @@ impl Engine {
 
     /// Wait until the scheduler has nothing left to do, for tests and the live checks.
     pub async fn wait_idle(&self, limit: Duration) -> bool {
+        if !self.cfg.compactor.tree {
+            return true;
+        }
         let mut rx = self.subscribe();
         let deadline = Instant::now() + limit;
         loop {

@@ -12,6 +12,18 @@ use tokio::sync::oneshot;
 
 pub const MAX_ATTEMPTS: usize = 5;
 
+/// What a raw history's cut asks for after the chat being cut: an analysis, then a summary.
+const CUT: &str = include_str!("../prompts/cut.md");
+
+/// The `<summary>` of a reply to the cut prompt, without its `<analysis>`.
+pub fn cut_summary(reply: &str) -> String {
+    let body = match (reply.find("<summary>"), reply.rfind("</summary>")) {
+        (Some(a), Some(b)) if a < b => &reply[a + "<summary>".len()..b],
+        _ => reply.rsplit_once("</analysis>").map_or(reply, |(_, s)| s),
+    };
+    body.trim().to_owned()
+}
+
 /// Strip an `id+n|` head the model may have copied from the view, and surrounding whitespace.
 pub fn clean_reply(raw: &str) -> String {
     let t = raw.trim();
@@ -119,6 +131,43 @@ impl Compactor {
         };
         let _ = std::fs::remove_file(&file);
         r
+    }
+
+    /// One call that summarizes `chat`, the part of a raw history being cut, as `prompts/cut.md`
+    /// asks, under the harness's own system prompt with no tools.
+    pub async fn summarize(&self, chat: &str, timeout: u64) -> (std::result::Result<String, String>, Vec<Call>) {
+        let file = match self.prompt_file(&format!("<chat>\n{chat}</chat>\n\n{CUT}")) {
+            Ok(f) => f,
+            Err(e) => return (Err(e.to_string()), Vec::new()),
+        };
+        let args = RunArgs {
+            agent: self.settings.agent.clone(),
+            model: self.settings.model.clone(),
+            effort: self.settings.effort.clone(),
+            profile: "sealed".into(),
+            no_web: true,
+            tools: Some(String::new()),
+            prompt_file: file.clone(),
+            timeout,
+            ..Default::default()
+        };
+        let r = self.aop.run(&args).await;
+        let _ = std::fs::remove_file(&file);
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => return (Err(e.to_string()), Vec::new()),
+        };
+        self.aop.cleanup(&r.run_id).await;
+        let calls = vec![Call::of(&r)];
+        let summary = cut_summary(r.reply());
+        let out = if !r.succeeded {
+            Err(r.failure())
+        } else if summary.is_empty() {
+            Err(format!("run {} returned no summary", r.run_id))
+        } else {
+            Ok(summary)
+        };
+        (out, calls)
     }
 
     /// Build one node's text. `prompt` is the whole first prompt; `source` is what it summarizes,
@@ -297,6 +346,13 @@ mod tests {
         let out = compactor(&fake).build(&prompt(), &src(5_000)).await;
         assert_eq!(out.calls.len(), MAX_ATTEMPTS);
         assert!(out.result.err().unwrap().contains("no reply under 1024 bytes"));
+    }
+
+    #[test]
+    fn a_cut_summary_drops_the_analysis() {
+        assert_eq!(cut_summary("<analysis>\nthinking\n</analysis>\n\n<summary>\n1. Intent: x\n</summary>"), "1. Intent: x");
+        assert_eq!(cut_summary("<analysis>a</analysis>\nplain notes"), "plain notes");
+        assert_eq!(cut_summary("just notes"), "just notes");
     }
 
     #[tokio::test]

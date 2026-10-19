@@ -305,13 +305,23 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
     if !t.raw {
         wait_for_summaries(engine).await;
     }
+    let l = &engine.cfg.limits;
+    let lim = crate::raw::Limits { stub_chars: t.stub_chars, high: l.raw_high, low: l.raw_low };
+    if t.raw {
+        // A cut summarizes the history it removes; until that summary exists the history stays whole.
+        let due = crate::raw::due_cut(&mut engine.mem(), &lim)?;
+        if let Some((cut, chat)) = due {
+            if let Some(summary) = engine.summarize_cut(&chat).await {
+                crate::raw::save_cut(&engine.dir, cut, &summary)?;
+            }
+        }
+    }
     let note = t.tail_note.as_deref().unwrap_or(if t.raw { "" } else { TAIL_NOTE });
     let tail = format!("<state>\ndate: {}\n{note}{}</state>\n{text}", date.map_or_else(now_iso, str::to_owned), if note.is_empty() { "" } else { "\n" });
     let (prompt, index) = {
         let mut m = engine.mem();
         let prompt = if t.raw {
-            let l = &engine.cfg.limits;
-            crate::raw::prompt(&mut m, &crate::raw::Limits { stub_chars: t.stub_chars, high: l.raw_high, low: l.raw_low }, t.zoom, &tail)?
+            crate::raw::prompt(&mut m, &lim, &tail)?
         } else if t.view {
             m.chat_prompt(&tail)?
         } else {
@@ -383,7 +393,29 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             aop.cleanup(id).await;
         }
     }
+    if t.native && t.prune_sessions {
+        prune_sessions(&aop, &runs);
+    }
     outcome
+}
+
+/// Delete the Claude Code session files of `runs`, found by the session id each run's events name,
+/// in every project folder of the session store (`$CLAUDE_CONFIG_DIR` or `~/.claude`).
+fn prune_sessions(aop: &crate::aop::Aop, runs: &[String]) {
+    let ids: std::collections::BTreeSet<String> = runs
+        .iter()
+        .filter_map(|r| std::fs::read_to_string(aop.events_path(r)).ok())
+        .filter_map(|events| events.lines().find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()?.get("session_id")?.as_str().map(str::to_owned)))
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+        .collect();
+    let store = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")));
+    let Some(projects) = store.map(|s| s.join("projects")) else { return };
+    for dir in std::fs::read_dir(projects).into_iter().flatten().flatten() {
+        for id in &ids {
+            let _ = std::fs::remove_file(dir.path().join(format!("{id}.jsonl")));
+            let _ = std::fs::remove_dir_all(dir.path().join(id));
+        }
+    }
 }
 
 #[cfg(test)]

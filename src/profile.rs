@@ -22,6 +22,9 @@ pub struct Compactor {
     pub timeout: u64,
     /// Send the view as blocks with one cache mark (`aop --prompt-parts`).
     pub prompt_parts: bool,
+    /// Summarize every message into the tree. Off, nothing is summarized per message, which only
+    /// `turn.raw` can do without: it summarizes once at each cut instead.
+    pub tree: bool,
 }
 
 impl Default for Compactor {
@@ -35,6 +38,7 @@ impl Default for Compactor {
             hard_bytes: 1024,
             timeout: 120,
             prompt_parts: true,
+            tree: true,
         }
     }
 }
@@ -79,6 +83,9 @@ pub struct Turn {
     /// Watch the systemd units a turn's tools start (`Running as unit: NAME`) and send a message
     /// when each one stops.
     pub watch_units: bool,
+    /// With `native`: delete each turn's Claude Code session files once the turn ends. Each holds
+    /// the whole prompt, so kept they would grow the session store and repeat the chat in searches.
+    pub prune_sessions: bool,
 }
 
 impl Default for Turn {
@@ -103,6 +110,7 @@ impl Default for Turn {
             stub_chars: 1000,
             native: false,
             watch_units: false,
+            prune_sessions: false,
         }
     }
 }
@@ -154,6 +162,9 @@ impl Config {
         }
         if cfg.turn.native && (cfg.turn.profile != "host" || cfg.turn.workdir.is_none()) {
             return msg("turn.native = true needs turn.profile = \"host\" and a turn.workdir");
+        }
+        if !cfg.compactor.tree && !cfg.turn.raw {
+            return msg("compactor.tree = false needs turn.raw = true");
         }
         if cfg.compactor.workers == 0 || cfg.limits.view_low >= cfg.limits.view_high || cfg.limits.compaction_low >= cfg.limits.compaction_high || cfg.limits.raw_low >= cfg.limits.raw_high {
             return msg("config: workers must be positive and each low mark below its high mark");

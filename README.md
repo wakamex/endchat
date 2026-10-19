@@ -22,6 +22,7 @@ endchat say main "what did I decide about the staging database?"
 endchat status main
 endchat zoom main 40 8      # what the model sees for zoom(40, 8)
 endchat check main          # log, tree, and views against each other
+endchat search main 'vault|safe' -k user -n 5 -C 1   # regex over the log, each message once
 endchat sim                 # synthetic chat against a model of the prompt cache
 ```
 
@@ -45,6 +46,7 @@ workers = 8          # concurrent AOP calls
 accept_bytes = 640   # largest reply taken without a retry; 512 is the gist's strict rule
 hard_bytes = 1024    # largest reply kept after the last of 5 attempts
 timeout = 120
+tree = true          # summarize every message; false needs turn.raw, which then summarizes once per cut
 
 [turn]
 agent = "claude"
@@ -64,6 +66,7 @@ raw = false          # send the chat word for word instead of the view (see Raw 
 stub_chars = 1000    # with raw: longer tool results are stubbed once older than the previous turn
 native = false       # run turns as plain Claude Code in workdir: its own system prompt, CLAUDE.md, memory, skills, tools and sessions; needs profile = "host" and workdir, and no_web = false for Bash and web tools
 watch_units = false  # tell the chat when a systemd unit its tools started stops
+prune_sessions = false  # with native: delete each turn's Claude Code session files when it ends
 
 [turn.commands]      # extra text tools: a reply line `name(ARG)` or `name ARG` runs `program PROFILE_DIR ARG`
 # search = "/path/to/search_tool"
@@ -81,9 +84,9 @@ raw_low = 160000     # what the cut leaves word for word
 
 ### Raw history
 
-With `raw = true` a turn sends the chat itself, each message as `id|kind: text`, in place of the view. A tool result longer than `stub_chars` is replaced by a one-line stub naming the call once it is older than the previous turn. Each turn is one cache block and the cache mark sits on the last block before the previous turn, the part that no later turn changes. When the history passes `raw_high` bytes, its oldest messages are replaced by the chat view's summary lines until `raw_low` bytes remain; the cut is kept in `raw.json`, so the prefix stays the same until the next cut. The compaction workers still summarize every message, for those lines.
+With `raw = true` a turn sends the chat itself, each message as `id|kind: text`, in place of the view. A tool result longer than `stub_chars` is replaced by a one-line stub naming the call once it is older than the previous turn. Each turn is one cache block and the cache mark sits on the last block before the previous turn, the part that no later turn changes. When the history passes `raw_high` bytes, its oldest turns are cut off until at most `raw_low` bytes remain, never cutting into the previous turn, and one call to the compactor model summarizes what was cut, together with the summary of any earlier cut, as `prompts/cut.md` asks: intent, decisions, facts to keep, corrections, standing instructions, open threads, and where it left off. The cut and its summary are kept in `raw.json`, so the prefix stays the same until the next cut; if the summary call fails, the history stays whole until a later turn. With `compactor.tree = false` nothing else is summarized, so imports need no summaries either.
 
-With `native = true` as well, turns run as Claude Code does on its own in `workdir`, through `aop --workdir --native-state`, while the run records stay in the profile. Its sessions then appear among the user's own Claude Code sessions for that directory.
+With `native = true` as well, turns run as Claude Code does on its own in `workdir`, through `aop --workdir --native-state`, while the run records stay in the profile. Each turn is a Claude Code session of its own whose file holds the whole prompt; `prune_sessions = true` deletes those files when the turn ends, so they neither pile up nor repeat the chat in session searches. `endchat search` searches the profile's own log instead.
 
 `contrib/claude_session.py SESSION.jsonl > history.json` turns a Claude Code session transcript into a file for `endchat import`, so an existing session's history can continue in endchat.
 

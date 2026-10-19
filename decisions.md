@@ -71,6 +71,11 @@ The live check (`src/live.rs`) generated a labeled synthetic 300-message chat wi
 - All 6 facts were recovered. Three answers needed no tool call because the summaries already held the fact; three used one `zoom`. Because the planted facts are prominent, this shows the pipeline works end to end, not how well deep recall works on subtler facts.
 - Cache reads were low, because this check ran before the view was sent with cache marks (decision 3 about AOP): 9.9% of compaction input tokens (the ledger's rolling ratio, 6.5%, covers the last 200 calls) and 35% for turns, against 96% and 98.6% in the gist. The harness caches the system prompt and, within a turn, the earlier rounds that `aop resume` continues, but not the view, because AOP sends the prompt as one block and cache entries are stored only at marks. This is the situation D2 describes, and cache-marked prompt parts were added for it; `endchat sim` models what they recover (97.8% for turns, 92.4% for compactions). The check has not been rerun with them.
 
+## Decisions about raw history
+
+1. A raw-history cut summarizes what it removes in one call, at a turn boundary, and keeps that summary until the next cut. The per-message summary tree adds little to recall when the model can search the log (the debate benchmark found the view held what a reply needed in 20 of 228 cases), but dropping the cut part with nothing left loses what was being done and decided. One call per cut keeps that at the cost of a few cents a cut, not a call per message. Its instructions follow the sections of Claude Code's compaction summary, rewritten for a chat; Claude Code's own text is not copied.
+2. With native turns, each turn's Claude Code session file holds the whole prompt, up to `raw_high` bytes. `prune_sessions` deletes them by the session ids in the turn's run records, so the session store does not grow by that much a turn and searches over it do not find each message once per later turn.
+
 ## Not done
 
 - D1 (tool bridge) is not built or requested, as above.

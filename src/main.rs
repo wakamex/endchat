@@ -13,6 +13,7 @@ mod profile;
 mod prompts;
 mod raw;
 mod sched;
+mod search;
 mod server;
 mod sim;
 mod store;
@@ -83,6 +84,26 @@ enum Command {
     },
     /// Verify the log, tree, and views against each other; exit nonzero on a mismatch
     Check { profile: String },
+    /// Print the messages of a profile's log that match a regular expression
+    Search {
+        profile: String,
+        pattern: String,
+        /// Only messages of this kind (user, agent, tool, echo, work, note); repeat for more
+        #[arg(short, long)]
+        kind: Vec<String>,
+        /// Only the newest N matches
+        #[arg(short, long)]
+        newest: Option<usize>,
+        /// Also print N messages before and after each match
+        #[arg(short = 'C', long, default_value_t = 0)]
+        context: u64,
+        /// Ignore case
+        #[arg(short, long)]
+        ignore_case: bool,
+        /// Characters shown of each message, around its first match
+        #[arg(long, default_value_t = 2000)]
+        chars: usize,
+    },
     /// Replay a synthetic chat against a model of the prompt cache
     Sim {
         #[arg(long, default_value_t = 3000)]
@@ -188,6 +209,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Status { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "status"})).await?)),
         Command::Zoom { profile, id, n, offset } => return Ok(print_reply(query(&profile, json!({"cmd": "zoom", "id": id, "n": n, "offset": offset})).await?)),
         Command::Check { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "check"})).await?)),
+        Command::Search { profile, pattern, kind, newest, context, ignore_case, chars } => {
+            let pattern = regex::RegexBuilder::new(&pattern).case_insensitive(ignore_case).build().map_err(|e| Error::Msg(e.to_string()))?;
+            print!("{}", search::run(&Profile::locate(&profile)?, &search::Query { pattern, kinds: kind, newest, context, chars })?);
+        }
         Command::Sim { messages, interval_secs, latency_secs, every_message_lines, no_prime, compare_gist, history, real_time, pace } => {
             if let Some(file) = history {
                 let items: Vec<Imported> = serde_json::from_str(&std::fs::read_to_string(file)?).map_err(Error::from)?;
