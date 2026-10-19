@@ -395,7 +395,10 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
     }
     if t.native && t.stub_sessions {
         if let Some(store) = session_store() {
-            stub_sessions(&store, &session_ids(&aop, &runs));
+            for w in stub_sessions(&store, &session_ids(&aop, &runs)) {
+                eprintln!("endchat: session stub: {w}");
+                engine.set_error(format!("session stub: {w}"));
+            }
         }
     }
     outcome
@@ -415,54 +418,73 @@ fn session_ids(aop: &crate::aop::Aop, runs: &[String]) -> std::collections::BTre
         .collect()
 }
 
-/// The prompt endchat sent, as a record's text blocks show it, with the history before `</chat>`
-/// replaced by a one-line note; None when the content is not an endchat prompt.
-fn stubbed(content: &serde_json::Value) -> Option<serde_json::Value> {
-    let text: String = match content {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(blocks) => blocks.iter().filter_map(|b| b.get("text").and_then(|t| t.as_str())).collect(),
+/// A record's content with the history in endchat's prompt replaced by a one-line note, and the
+/// start of that history; None when the content holds no endchat prompt. The prompt is the run of
+/// text blocks from one starting `<chat>` to the one holding `</chat>`, wherever it sits: the stored
+/// copy of a request puts Claude Code's own context blocks first. Blocks around it stay.
+fn stubbed(content: &serde_json::Value) -> Option<(serde_json::Value, String)> {
+    let blocks: Vec<serde_json::Value> = match content {
+        serde_json::Value::String(s) => vec![serde_json::json!({ "type": "text", "text": s })],
+        serde_json::Value::Array(b) => b.clone(),
         _ => return None,
     };
-    let (history, tail) = text.strip_prefix("<chat>\n")?.rsplit_once("</chat>\n")?;
+    let text = |b: &serde_json::Value| b.get("text").and_then(|t| t.as_str()).map(str::to_owned);
+    let from = blocks.iter().position(|b| text(b).is_some_and(|t| t.starts_with("<chat>\n")))?;
+    let to = from + blocks[from..].iter().position(|b| text(b).is_some_and(|t| t.contains("</chat>\n")))?;
+    let joined: String = blocks[from..=to].iter().filter_map(text).collect();
+    let (history, tail) = joined.strip_prefix("<chat>\n")?.rsplit_once("</chat>\n")?;
+    let mark: String = text(&blocks[from]).unwrap_or_default().strip_prefix("<chat>\n").unwrap_or_default().chars().take(200).collect();
     let note = format!("[endchat history: {} characters, kept in the profile's log]\n", history.chars().count());
-    Some(serde_json::json!([{ "type": "text", "text": note + tail }]))
+    let mut out = blocks[..from].to_vec();
+    out.push(serde_json::json!({ "type": "text", "text": note + tail }));
+    out.extend_from_slice(&blocks[to + 1..]);
+    Some((serde_json::Value::Array(out), mark))
 }
 
 /// In the session files of `ids` under `store`, replace the history in endchat's prompt, kept in
 /// the user record and in the stored copy of the request, with a stub. Replies, tool calls and
-/// usage stay as they are.
-fn stub_sessions(store: &std::path::Path, ids: &std::collections::BTreeSet<String>) {
+/// usage stay as they are. A file whose records are not shaped as expected, with no user record
+/// holding the prompt or the prompt left in a record of another shape, is left whole: a change in
+/// Claude Code's format then costs disk, never data. Returns a warning for each such file.
+fn stub_sessions(store: &std::path::Path, ids: &std::collections::BTreeSet<String>) -> Vec<String> {
+    let mut warnings = Vec::new();
     for dir in std::fs::read_dir(store.join("projects")).into_iter().flatten().flatten() {
         for id in ids {
             let path = dir.path().join(format!("{id}.jsonl"));
             let Ok(old) = std::fs::read_to_string(&path) else { continue };
-            let mut changed = false;
+            let mut prompts = 0;
+            let mut histories: Vec<String> = Vec::new();
             let lines: Vec<String> = old
                 .lines()
                 .map(|l| {
-                    let Ok(mut r) = serde_json::from_str::<serde_json::Value>(l) else { return l.to_owned() };
-                    if !matches!(r.get("type").and_then(|t| t.as_str()), Some("user" | "api-request-blob")) {
-                        return l.to_owned();
-                    }
-                    match r.pointer("/message/content").and_then(stubbed) {
-                        Some(new) => {
+                    let parsed = serde_json::from_str::<serde_json::Value>(l).ok();
+                    let shaped = parsed.as_ref().is_some_and(|r| matches!(r.get("type").and_then(|t| t.as_str()), Some("user" | "api-request-blob")));
+                    if let (true, Some(mut r)) = (shaped, parsed) {
+                        if let Some((new, history)) = r.pointer("/message/content").and_then(stubbed) {
+                            prompts += usize::from(r["type"] == "user");
+                            histories.push(history);
                             r["message"]["content"] = new;
-                            changed = true;
-                            r.to_string()
+                            return r.to_string();
                         }
-                        None => l.to_owned(),
                     }
+                    l.to_owned()
                 })
                 .collect();
-            if changed {
-                let tmp = path.with_extension("jsonl.tmp");
-                if std::fs::write(&tmp, lines.join("\n") + "\n").and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
-                    let _ = std::fs::remove_file(&tmp);
-                    eprintln!("endchat: could not stub the prompt in {}", path.display());
-                }
+            // The history left anywhere else means a record shape endchat does not know.
+            let marks: Vec<String> = histories.iter().filter_map(|h| serde_json::to_string(h).ok()).map(|j| j.trim_matches('"').to_owned()).filter(|m| m.len() >= 8).collect();
+            let unknown = lines.iter().filter(|l| marks.iter().any(|m| l.contains(m.as_str()))).count();
+            if prompts == 0 || unknown > 0 {
+                warnings.push(format!("left {} whole: {}", path.display(), if prompts == 0 { "no user record holds endchat's prompt" } else { "the prompt is also in records of a shape endchat does not know" }));
+                continue;
+            }
+            let tmp = path.with_extension("jsonl.tmp");
+            if let Err(e) = std::fs::write(&tmp, lines.join("\n") + "\n").and_then(|_| std::fs::rename(&tmp, &path)) {
+                let _ = std::fs::remove_file(&tmp);
+                warnings.push(format!("could not stub {}: {e}", path.display()));
             }
         }
     }
+    warnings
 }
 
 #[cfg(test)]
@@ -597,19 +619,28 @@ mod tests {
         let prompt = json!([{"type": "text", "text": "<chat>\n0|user: hello\n"}, {"type": "text", "text": "1|agent: hi\n</chat>\n<state>\ndate: d\n</state>\nnew message"}]);
         let records = [
             json!({"type": "user", "message": {"role": "user", "content": prompt}}),
-            json!({"type": "api-request-blob", "hash": "h", "message": {"role": "user", "content": prompt}}),
+            json!({"type": "api-request-blob", "hash": "h", "message": {"role": "user", "content": [{"type": "text", "text": "<system-reminder>context</system-reminder>"}, prompt[0], prompt[1]]}}),
             json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "<chat>\nnot a prompt</chat>\n"}]}}),
             json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "reply"}], "usage": {"input_tokens": 5}}}),
         ];
         let file = dir.join("sid.jsonl");
         std::fs::write(&file, records.iter().map(|r| r.to_string() + "\n").collect::<String>()).unwrap();
         std::fs::write(dir.join("other.jsonl"), records[0].to_string() + "\n").unwrap();
-        stub_sessions(store.path(), &["sid".to_owned()].into());
+        assert!(stub_sessions(store.path(), &["sid".to_owned()].into()).is_empty());
         let lines: Vec<serde_json::Value> = std::fs::read_to_string(&file).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
         let stub = json!([{"type": "text", "text": "[endchat history: 26 characters, kept in the profile's log]\n<state>\ndate: d\n</state>\nnew message"}]);
-        assert_eq!((&lines[0]["message"]["content"], &lines[1]["message"]["content"]), (&stub, &stub));
+        assert_eq!(lines[0]["message"]["content"], stub);
+        assert_eq!(lines[1]["message"]["content"], json!([{"type": "text", "text": "<system-reminder>context</system-reminder>"}, stub[0]]), "context before the prompt stays");
         assert_eq!((&lines[2], &lines[3]), (&records[2], &records[3]), "tool results and replies stay");
         assert!(std::fs::read_to_string(dir.join("other.jsonl")).unwrap().contains("0|user: hello"), "other sessions stay");
+        // A record of a shape endchat does not know still holding the prompt leaves the file whole.
+        let changed = [records[0].clone(), json!({"type": "request-copy", "content": prompt})];
+        let text = changed.iter().map(|r| r.to_string() + "\n").collect::<String>();
+        std::fs::write(dir.join("new.jsonl"), &text).unwrap();
+        std::fs::write(dir.join("none.jsonl"), records[3].to_string() + "\n").unwrap();
+        let warnings = stub_sessions(store.path(), &["new".to_owned(), "none".to_owned()].into());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert_eq!(std::fs::read_to_string(dir.join("new.jsonl")).unwrap(), text);
     }
 
     #[tokio::test]
