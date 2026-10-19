@@ -100,6 +100,7 @@ view.json               the chat view and the compaction view as last saved
 raw.json                with raw: where the raw history starts
 units.txt               with watch_units: units still being watched
 ledger.jsonl            every AOP call with its usage, for the cache-read ratios
+turns.jsonl             one line per finished turn: the log length at its end and whether it succeeded
 system-prompt.txt       the system prompt in use
 .aop/                   AOP's own run records
 ```

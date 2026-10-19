@@ -23,6 +23,8 @@ const SUMMARY_WAIT: Duration = Duration::from_secs(600);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnEvent {
     Queued,
+    /// The message is logged as message `i`.
+    Accepted(u64),
     Agent(String),
     Tool(String),
     Echo(String),
@@ -160,7 +162,9 @@ pub async fn say(engine: Arc<Engine>, text: String, date: Option<String>, tx: Un
     let mut next = Some(text);
     let mut outcome = Ok(());
     while let Some(m) = next.take() {
-        if let Err(e) = run_turn(&engine, &m, date.as_deref(), &tx).await {
+        let r = run_turn(&engine, &m, date.as_deref(), &tx).await;
+        engine.turn_ended(r.is_ok());
+        if let Err(e) = r {
             engine.set_error(format!("turn failed: {e}"));
             emit(&tx, TurnEvent::Error(e.to_string()));
             outcome = Err(e);
@@ -306,7 +310,8 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
         };
         (prompt, m.log.len())
     };
-    engine.append(Kind::User, text, None)?;
+    let logged = engine.append(Kind::User, text, None)?;
+    emit(tx, TurnEvent::Accepted(logged[0].i));
     let aop = turn_aop(engine);
     let cleanup = engine.cfg.turn.profile == "sealed";
     let mut runs: Vec<String> = Vec::new();
@@ -443,6 +448,7 @@ mod tests {
         assert_eq!(
             events,
             [
+                TurnEvent::Accepted(2),
                 TurnEvent::Agent("Checking.".into()),
                 TurnEvent::Tool(r#"zoom {"id":0,"n":2}"#.into()),
                 TurnEvent::Echo("0+1|user: hello\n1+1|agent: hi there\n".into()),
@@ -464,6 +470,8 @@ mod tests {
         assert_eq!((calls[1]["cmd"].as_str(), calls[1]["from"].as_str()), (Some("resume"), Some("fake-1")));
         assert!(calls[1]["prompt"].as_str().unwrap().starts_with("<result call=\"zoom(0, 2)\">\n0+1|user: hello"));
         assert_eq!(e.ledger().iter().filter(|l| l.kind == "turn").count(), 2);
+        let end: serde_json::Value = serde_json::from_str(std::fs::read_to_string(d.path().join("turns.jsonl")).unwrap().trim()).unwrap();
+        assert_eq!((end["end"].as_u64(), end["ok"].as_bool()), (Some(7), Some(true)));
         assert!(calls.iter().filter(|c| c["cmd"] == "cleanup").count() >= 2);
     }
 
@@ -539,7 +547,9 @@ mod tests {
         let (tx, rx) = unbounded_channel();
         assert!(say(e.clone(), "hi".into(), None, tx).await.is_err());
         let events = collect(rx).await;
-        assert!(matches!(events[0], TurnEvent::Error(_)));
+        assert!(matches!(events[..2], [TurnEvent::Accepted(0), TurnEvent::Error(_)]));
+        let end = std::fs::read_to_string(d.path().join("turns.jsonl")).unwrap();
+        assert!(end.contains("\"ok\":false"), "{end}");
         assert!(!e.turn_running.load(Ordering::SeqCst));
         let (tx, rx) = unbounded_channel();
         say(e.clone(), "again".into(), None, tx).await.unwrap();

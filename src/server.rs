@@ -27,6 +27,7 @@ pub enum Request {
 fn event_json(e: &TurnEvent) -> Value {
     match e {
         TurnEvent::Queued => json!({"event": "queued"}),
+        TurnEvent::Accepted(i) => json!({"event": "accepted", "i": i}),
         TurnEvent::Agent(t) => json!({"event": "agent", "text": t}),
         TurnEvent::Tool(t) => json!({"event": "tool", "text": t}),
         TurnEvent::Echo(t) => json!({"event": "echo", "text": t}),
@@ -157,7 +158,7 @@ mod tests {
         }
         let mut lines = Vec::new();
         assert!(ask(d.path(), &json!({"cmd": "say", "text": "hello"}), |v| lines.push(v)).await.unwrap());
-        assert_eq!(lines, [json!({"event": "agent", "text": "Hello back."}), json!({"event": "done"})]);
+        assert_eq!(lines, [json!({"event": "accepted", "i": 1}), json!({"event": "agent", "text": "Hello back."}), json!({"event": "done"})]);
         let mut status = Vec::new();
         ask(d.path(), &json!({"cmd": "status"}), |v| status.push(v)).await.unwrap();
         assert!(status[0]["text"].as_str().unwrap().starts_with("messages: 3\n"));

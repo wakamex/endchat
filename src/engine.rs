@@ -150,6 +150,16 @@ impl Engine {
         self.changed.subscribe()
     }
 
+    /// Append the end of a turn to `turns.jsonl`: the log length then, and whether it succeeded.
+    /// It is kept out of the log because the log is what the model reads.
+    pub fn turn_ended(&self, ok: bool) {
+        let line = serde_json::json!({"end": self.mem().log.len(), "ok": ok, "date": crate::util::now_iso()}).to_string() + "\n";
+        let appended = fs::OpenOptions::new().create(true).append(true).open(self.dir.join("turns.jsonl")).and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        if let Err(e) = appended {
+            eprintln!("endchat: cannot record the end of a turn: {e}");
+        }
+    }
+
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
