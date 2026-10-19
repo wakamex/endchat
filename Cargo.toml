@@ -2,7 +2,7 @@
 name = "endchat"
 version = "0.1.0"
 description = "A chat that never ends: memory kept as a tree of summaries, every model call made through AOP"
-license = "MIT"
+license = "MIT AND Apache-2.0"
 edition = "2024"
 
 [dependencies]

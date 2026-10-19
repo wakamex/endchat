@@ -110,7 +110,7 @@ system-prompt.txt       the system prompt in use
 - Turns call `zoom` and `date` as text lines because AOP cannot yet relay a tool server into a run. See decision 1.
 - Only the Claude harness is supported for turns.
 - The default turn profile is `sealed`: the model can read the chat's memory but touches no files.
-- `prompts/system.md` follows the UniiChat prompt, which has no license. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- `prompts/system.md` follows the UniiChat prompt and is under the Apache License 2.0. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Development
 
@@ -124,4 +124,4 @@ endchat sim --compare-gist --messages 30000
 
 ## License
 
-MIT, except `prompts/system.md`, which follows the UniiChat prompt and is covered by the notice in THIRD_PARTY_NOTICES.md.
+MIT, except `prompts/system.md`, which follows the UniiChat prompt and is under the Apache License 2.0 (`prompts/LICENSE-UniiChat`); see THIRD_PARTY_NOTICES.md.
