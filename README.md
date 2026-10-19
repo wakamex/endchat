@@ -2,7 +2,7 @@
 
 endchat is a command-line chat that never ends. Every message is logged word for word, a cheap model compresses the log into a binary tree of one-line summaries, and each user message starts a fresh model call whose context is a bounded view of that tree plus the new message. The model reads originals through a `zoom` tool. The design is [Victor Taelin's UniiChat recipe](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449), written in Rust, with every model call and session handled by the [Agent Orchestration Process (AOP)](https://github.com/wakamex/agent-orchestration-process).
 
-The design is in [SPEC.md](SPEC.md). Every decision made while implementing it, with the reasons, is in [decisions.md](decisions.md).
+The design is in [SPEC.md](SPEC.md). Every decision made while implementing it, with the reasons, is in [decisions.md](decisions.md). How well the model reads its history through zoom, against search tools, a smaller view and the whole history in context, is evaluated in [evals/search-tools](evals/search-tools/README.md).
 
 ## Install
 
@@ -35,6 +35,7 @@ endchat sim                 # synthetic chat against a model of the prompt cache
 
 ```toml
 aop_bin = "aop"
+# system_prompt = "/path/to/system.md"   # replaces the built-in prompts/system.md; instructions.md is then not appended
 
 [compactor]
 agent = "claude"
@@ -56,6 +57,12 @@ tools = ""           # built-in harness tools for turns, comma separated
 no_web = true
 timeout = 900
 max_rounds = 40
+zoom = true          # answer zoom and date calls; false leaves the model with its commands only
+view = true          # send the chat view with each message; false sends the message alone
+# tail_note = "..."  # replaces the note sent with every message
+
+[turn.commands]      # extra text tools: a reply line `name(ARG)` or `name ARG` runs `program PROFILE_DIR ARG`
+# search = "/path/to/search_tool"
 
 [limits]
 view_high = 128000
