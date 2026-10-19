@@ -26,7 +26,10 @@ struct Saved {
     cut: u64,
 }
 
-const INTRO: &str = "<chat>\nThe whole chat so far, oldest first. Each message is `id|kind: text`; kinds are user, agent (your replies), tool (your tool calls), echo (their results), work and note. A large tool result older than the previous turn is replaced by a stub: run the call again if you need it.\n";
+/// Written so the model takes the `agent` entries as its own replies and keeps to their rules and
+/// length: on replayed turns of a real chat this answered as often and as long as sending the same
+/// history as real conversation turns, and shorter and less often than a neutral description.
+const INTRO: &str = "<chat>\nThis is the conversation you have been taking part in, oldest first, one message per entry as `id|kind: text`. `agent` entries are your own earlier replies, exactly as you sent them; `tool` and `echo` entries are your tool calls and their results; `user` entries are the messages you received; `work` and `note` entries are reports and notes. A large tool result older than the previous turn is replaced by a stub: run the call again if you need it. The message after </chat> is the next one you received. Your final response is your next `agent` entry: follow the same instructions and rules your earlier replies followed, and match their length and style.\n";
 
 const SUMMARY_NOTE: &str = "The oldest messages are summarized as `id+n|text`, one line for the n messages from id on.";
 
