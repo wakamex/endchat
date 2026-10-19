@@ -151,28 +151,37 @@ fn emit(tx: &UnboundedSender<TurnEvent>, e: TurnEvent) {
 }
 
 /// Accept a user message. If a turn is running it is queued for that turn; otherwise a turn
-/// starts, followed by one for each message queued while it ran.
+/// starts, followed by one for each message queued while it ran, in order, whether or not the
+/// turn before succeeded. Returns the first turn's error.
 pub async fn say(engine: Arc<Engine>, text: String, date: Option<String>, tx: UnboundedSender<TurnEvent>) -> Result<()> {
-    if engine.turn_running.swap(true, Ordering::SeqCst) {
-        engine.inbox.lock().expect("inbox lock poisoned").push_back(text);
-        emit(&tx, TurnEvent::Queued);
-        emit(&tx, TurnEvent::Done);
-        return Ok(());
+    {
+        // The flag is read and cleared under the inbox lock, so a queued message always has a turn to take it.
+        let mut inbox = engine.inbox.lock().expect("inbox lock poisoned");
+        if engine.turn_running.swap(true, Ordering::SeqCst) {
+            inbox.push_back((text, date));
+            emit(&tx, TurnEvent::Queued);
+            emit(&tx, TurnEvent::Done);
+            return Ok(());
+        }
     }
-    let mut next = Some(text);
+    let mut next = Some((text, date));
     let mut outcome = Ok(());
-    while let Some(m) = next.take() {
-        let r = run_turn(&engine, &m, date.as_deref(), &tx).await;
+    while let Some((m, d)) = next.take() {
+        let r = run_turn(&engine, &m, d.as_deref(), &tx).await;
         engine.turn_ended(r.is_ok());
         if let Err(e) = r {
             engine.set_error(format!("turn failed: {e}"));
             emit(&tx, TurnEvent::Error(e.to_string()));
-            outcome = Err(e);
-            break;
+            if outcome.is_ok() {
+                outcome = Err(e);
+            }
         }
-        next = engine.inbox.lock().expect("inbox lock poisoned").pop_front();
+        let mut inbox = engine.inbox.lock().expect("inbox lock poisoned");
+        next = inbox.pop_front();
+        if next.is_none() {
+            engine.turn_running.store(false, Ordering::SeqCst);
+        }
     }
-    engine.turn_running.store(false, Ordering::SeqCst);
     emit(&tx, TurnEvent::Done);
     outcome
 }
@@ -359,9 +368,10 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             log(engine, tx, Kind::Echo, &out, &r.run_id)?;
             next += &format!("<result call=\"{}\">\n{}\n</result>\n", c.label(), crate::log::clip(&out));
         }
-        let queued: Vec<String> = engine.inbox.lock().expect("inbox lock poisoned").drain(..).collect();
-        for q in queued {
-            engine.append(Kind::User, &q, None)?;
+        let queued: Vec<(String, Option<String>)> = engine.inbox.lock().expect("inbox lock poisoned").drain(..).collect();
+        for (q, _) in queued {
+            // Logged with the run it reached, so it does not count as the start of a turn.
+            engine.append(Kind::User, &q, Some(&r.run_id))?;
             next += &format!("The user sent this while you worked:\n{q}\n");
         }
         let file = write_prompt(engine, &next)?;
@@ -528,7 +538,7 @@ mod tests {
         let fake = FakeAop::new(json!({"turn_replies": ["First answer.", "Second answer."]}));
         let d = tempfile::tempdir().unwrap();
         let e = engine(&fake, d.path());
-        e.inbox.lock().unwrap().push_back("and another thing".into());
+        e.inbox.lock().unwrap().push_back(("and another thing".into(), None));
         let (tx, rx) = unbounded_channel();
         say(e.clone(), "one".into(), None, tx).await.unwrap();
         let events = collect(rx).await;
@@ -554,6 +564,21 @@ mod tests {
         let (tx, rx) = unbounded_channel();
         say(e.clone(), "again".into(), None, tx).await.unwrap();
         assert!(collect(rx).await.contains(&TurnEvent::Agent("fine".into())));
+    }
+
+    #[tokio::test]
+    async fn a_message_queued_behind_a_failed_turn_still_gets_its_turn() {
+        let fake = FakeAop::new(json!({"fail_first": 1, "turn_replies": ["second answer"]}));
+        let d = tempfile::tempdir().unwrap();
+        let e = engine(&fake, d.path());
+        e.inbox.lock().unwrap().push_back(("queued".into(), Some("2026-10-19T09:00:00Z".into())));
+        let (tx, rx) = unbounded_channel();
+        assert!(say(e.clone(), "fails".into(), None, tx).await.is_err());
+        let events = collect(rx).await;
+        assert!(events.contains(&TurnEvent::Agent("second answer".into())), "{events:?}");
+        assert!(!e.turn_running.load(Ordering::SeqCst) && e.inbox.lock().unwrap().is_empty());
+        let runs: Vec<_> = fake.calls().into_iter().filter(|c| c["cmd"] == "run").collect();
+        assert!(runs[1]["prompt"].as_str().unwrap().contains("date: 2026-10-19T09:00:00Z"), "the queued message keeps its own date");
     }
 
     #[tokio::test]

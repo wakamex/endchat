@@ -86,8 +86,9 @@ pub struct Engine {
     last_call: Mutex<Option<Instant>>,
     last_error: Mutex<Option<String>>,
     stop: AtomicBool,
-    /// Messages sent while a turn runs, in order; the turn takes them between tool calls.
-    pub inbox: Mutex<VecDeque<String>>,
+    /// Messages sent while a turn runs, with the date each was sent with, in order; the turn takes
+    /// them between tool calls, or each starts a turn after it.
+    pub inbox: Mutex<VecDeque<(String, Option<String>)>>,
     pub turn_running: AtomicBool,
 }
 
