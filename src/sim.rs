@@ -247,7 +247,7 @@ fn start_burst(mem: &mut Memory, cache: &mut Cache, flights: &mut Vec<Flight>, r
         let lines = keyed(mem, mem.comp.prefix(end));
         let mut tail = 1_000 + rng.next() as usize % 600;
         if cfg.real_tails {
-            tail = mem.task(job).map_or(tail, |t| t.source_bytes + 700);
+            tail = mem.task(job).map_or(tail, |t| t.source.len() + 700);
         }
         let (read, total) = cache.request(at, cfg.ttft_ms, cfg.system_bytes, &lines, tail);
         stats.0 += read;

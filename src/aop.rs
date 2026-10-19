@@ -59,6 +59,9 @@ pub struct AopResult {
     pub model: Option<String>,
     #[serde(default)]
     pub error: Option<serde_json::Value>,
+    /// Set when the provider refused the input, as opposed to failing.
+    #[serde(default)]
+    pub refusal: Option<serde_json::Value>,
 }
 
 impl AopResult {

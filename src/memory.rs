@@ -81,8 +81,8 @@ pub fn view_prompt(rows: &[String], tail: &str) -> Prompt {
 pub struct Task {
     /// The compaction view, then the task text.
     pub prompt: Prompt,
-    /// Bytes of the source the reply must be strictly smaller than.
-    pub source_bytes: usize,
+    /// The source the reply must be strictly smaller than: the message, or the two lines merged.
+    pub source: String,
 }
 
 pub struct Limits {
@@ -333,7 +333,7 @@ impl Memory {
                 let task = format!(
                     "Compaction: compress message {i} into one line of at most {NODE_BYTES} bytes\n(about 70 words), the length of this ruler:\n{ruler}\n<input>\n{source}\n</input>"
                 );
-                Ok(Task { prompt: self.compaction_prompt(i, &task)?, source_bytes: source.len() })
+                Ok(Task { prompt: self.compaction_prompt(i, &task)?, source })
             }
             Job::Merge(l, i) => {
                 let (a, b) = (self.tree.get(l - 1, 2 * i)?, self.tree.get(l - 1, 2 * i + 1)?);
@@ -347,7 +347,7 @@ impl Memory {
                     flat(&a.text),
                     flat(&b.text)
                 );
-                Ok(Task { prompt: self.compaction_prompt(end, &task)?, source_bytes: a.size + 1 + b.size })
+                Ok(Task { prompt: self.compaction_prompt(end, &task)?, source: format!("{}\n{}", a.text, b.text) })
             }
         }
     }
@@ -550,7 +550,7 @@ pub mod tests {
         let text = task.prompt.text();
         assert!(text.contains("Compaction: merge lines 0+1 and 1+1, adjacent"));
         assert!(text.contains("messages, 0 to 1,"));
-        assert_eq!(task.source_bytes, 801);
+        assert_eq!(task.source.len(), 801);
     }
 
     #[test]

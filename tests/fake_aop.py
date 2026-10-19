@@ -100,12 +100,13 @@ def reply_for(prompt, attempt, chain, scenario):
     return replies[n] if n < len(replies) else "ok"
 
 
-def finish(run_id, reply, prompt, scenario, ok=True):
+def finish(run_id, reply, prompt, scenario, ok=True, refusal=None):
     result = {
         "run_id": run_id, "session_id": "sess-" + run_id, "status": "succeeded" if ok else "failed",
         "succeeded": ok, "timed_out": False, "final_message": reply, "model": "claude-fake-1",
         "usage": usage_for(prompt), "accounting_status": "complete", "usage_schema": "aop-token-usage-v3",
         "error": None if ok else {"message": "scripted failure"},
+        "refusal": refusal,
     }
     runs = os.path.join(os.getcwd(), ".aop", "runs", run_id)
     os.makedirs(runs, exist_ok=True)
@@ -147,6 +148,8 @@ def main():
             finish(run_id, "", prompt, scenario, ok=False)
         if scenario.get("compact") == "fail":
             finish(run_id, "", prompt, scenario, ok=False)
+        if scenario.get("compact") == "refuse":
+            finish(run_id, "API Error: refused", prompt, scenario, ok=False, refusal={"category": "test", "models": ["claude-fake-1"]})
         finish(run_id, reply_for(prompt, 1, run_id, scenario), prompt, scenario)
     elif cmd == "resume":
         opts, pos = parse([a for a in argv if a != "--json"] + ["--json"])

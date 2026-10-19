@@ -276,7 +276,7 @@ impl Engine {
             Err(e) => return self.job_failed(job, e.to_string()),
         };
         *self.last_call.lock().expect("lock poisoned") = Some(Instant::now());
-        let out = self.compactor.build_signalling(&task.prompt, task.source_bytes, signal).await;
+        let out = self.compactor.build_signalling(&task.prompt, &task.source, signal).await;
         self.record_calls("compaction", &out.calls);
         match out.result {
             Ok(b) => {
