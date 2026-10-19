@@ -35,6 +35,10 @@ pub struct RunArgs {
     pub timeout: u64,
     /// Task label, needed by profiles that make a worktree.
     pub task: Option<String>,
+    /// `host` only: run the harness in this directory itself, with no worktree (`--workdir`).
+    pub workdir: Option<PathBuf>,
+    /// `host` only: the harness uses the real home, its own system prompt, settings and sessions (`--native-state`).
+    pub native_state: bool,
 }
 
 /// The fields of AOP's normalized result that endchat uses.
@@ -78,6 +82,12 @@ pub fn run_argv(a: &RunArgs) -> Vec<String> {
     }
     if let Some(p) = &a.system_prompt_file {
         v.extend(["--system-prompt-file".into(), p.display().to_string()]);
+    }
+    if let Some(w) = &a.workdir {
+        v.extend(["--workdir".into(), w.display().to_string()]);
+    }
+    if a.native_state {
+        v.push("--native-state".into());
     }
     v.extend([if a.parts { "--prompt-parts" } else { "--prompt-file" }.into(), a.prompt_file.display().to_string(), "--timeout".into(), a.timeout.to_string(), "--json".into()]);
     if let Some(t) = &a.task {
@@ -155,6 +165,8 @@ mod tests {
             parts: false,
             timeout: 120,
             task: None,
+            workdir: None,
+            native_state: false,
         };
         assert_eq!(
             run_argv(&a).join(" "),
@@ -164,6 +176,8 @@ mod tests {
         let b = RunArgs { parts: true, ..a.clone() };
         assert!(run_argv(&b).join(" ").contains("--prompt-parts /p/task.txt --timeout"));
         assert!(!run_argv(&b).join(" ").contains("--prompt-file"));
+        let host = RunArgs { profile: "host".into(), no_web: false, tools: None, system_prompt_file: None, workdir: Some("/code/x".into()), native_state: true, ..b.clone() };
+        assert!(run_argv(&host).join(" ").ends_with("--profile host --workdir /code/x --native-state --prompt-parts /p/task.txt --timeout 120 --json"));
         assert_eq!(resume_argv("abc", Path::new("/p/r.txt"), 60).join(" "), "resume --prompt-file /p/r.txt --timeout 60 --json abc");
     }
 

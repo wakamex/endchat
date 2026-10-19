@@ -150,6 +150,10 @@ impl Engine {
         self.changed.subscribe()
     }
 
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         self.changed();

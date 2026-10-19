@@ -60,6 +60,10 @@ max_rounds = 40
 zoom = true          # answer zoom and date calls; false leaves the model with its commands only
 view = true          # send the chat view with each message; false sends the message alone
 # tail_note = "..."  # replaces the note sent with every message
+raw = false          # send the chat word for word instead of the view (see Raw history below)
+stub_chars = 1000    # with raw: longer tool results are stubbed once older than the previous turn
+native = false       # run turns as plain Claude Code in workdir: its own system prompt, CLAUDE.md, memory, skills, tools and sessions; needs profile = "host"
+watch_units = false  # tell the chat when a systemd unit its tools started stops
 
 [turn.commands]      # extra text tools: a reply line `name(ARG)` or `name ARG` runs `program PROFILE_DIR ARG`
 # search = "/path/to/search_tool"
@@ -69,9 +73,19 @@ view_high = 128000
 view_low = 64000
 compaction_high = 32000
 compaction_low = 16000
+raw_high = 640000    # with raw: bytes of history that start a cut to summary lines
+raw_low = 160000     # what the cut leaves word for word
 ```
 
 `instructions.md` in the profile directory is appended to the system prompt: who you are and how you want work done.
+
+### Raw history
+
+With `raw = true` a turn sends the chat itself, each message as `id|kind: text`, in place of the view. A tool result longer than `stub_chars` is replaced by a one-line stub naming the call once it is older than the previous turn. Each turn is one cache block and the cache mark sits on the last block before the previous turn, the part that no later turn changes. When the history passes `raw_high` bytes, its oldest messages are replaced by the chat view's summary lines until `raw_low` bytes remain; the cut is kept in `raw.json`, so the prefix stays the same until the next cut. The compaction workers still summarize every message, for those lines.
+
+With `native = true` as well, turns run as Claude Code does on its own in `workdir`, through `aop --workdir --native-state`, while the run records stay in the profile. Its sessions then appear among the user's own Claude Code sessions for that directory.
+
+With `watch_units = true`, a tool result containing `Running as unit: NAME`, which `systemd-run` prints, makes endchat poll that unit and send a `[systemd]` message when it stops, which starts a turn. Watched units are kept in `units.txt` across restarts.
 
 ## What is stored
 
@@ -81,6 +95,8 @@ main.idx                16-byte records locating each message; rebuilt from the 
 tree/YYYY-MM-DD.jsonl   summary nodes with the token usage of the calls that built them
 tree.idx                the same, keyed by node slot
 view.json               the chat view and the compaction view as last saved
+raw.json                with raw: where the raw history starts
+units.txt               with watch_units: units still being watched
 ledger.jsonl            every AOP call with its usage, for the cache-read ratios
 system-prompt.txt       the system prompt in use
 .aop/                   AOP's own run records

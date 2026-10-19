@@ -68,6 +68,17 @@ pub struct Turn {
     pub tail_note: Option<String>,
     /// Send the chat view with every message. Off sends the message alone.
     pub view: bool,
+    /// Send the chat word for word instead of the view, cut to summary lines past `limits.raw_high`.
+    pub raw: bool,
+    /// With `raw`: tool results longer than this are stubbed once they are older than the previous turn.
+    pub stub_chars: usize,
+    /// Run turns as the harness runs on its own, in `workdir` (`aop --workdir --native-state`): its
+    /// system prompt, CLAUDE.md, settings, memory, skills, default tools and session store. Needs
+    /// `profile = "host"`. `system_prompt`, `instructions.md` and `tools` then apply to compactions only.
+    pub native: bool,
+    /// Watch the systemd units a turn's tools start (`Running as unit: NAME`) and send a message
+    /// when each one stops.
+    pub watch_units: bool,
 }
 
 impl Default for Turn {
@@ -88,6 +99,10 @@ impl Default for Turn {
             commands: BTreeMap::new(),
             tail_note: None,
             view: true,
+            raw: false,
+            stub_chars: 1000,
+            native: false,
+            watch_units: false,
         }
     }
 }
@@ -99,11 +114,14 @@ pub struct Limits {
     pub view_low: usize,
     pub compaction_high: usize,
     pub compaction_low: usize,
+    /// With `turn.raw`: bytes of raw history that start a cut to summary lines, and what the cut leaves.
+    pub raw_high: usize,
+    pub raw_low: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { view_high: 128_000, view_low: 64_000, compaction_high: 32_000, compaction_low: 16_000 }
+        Self { view_high: 128_000, view_low: 64_000, compaction_high: 32_000, compaction_low: 16_000, raw_high: 640_000, raw_low: 160_000 }
     }
 }
 
@@ -134,7 +152,10 @@ impl Config {
         if cfg.turn.profile == "host" && !cfg.turn.allow_host {
             return msg("turn.profile = \"host\" needs turn.allow_host = true");
         }
-        if cfg.compactor.workers == 0 || cfg.limits.view_low >= cfg.limits.view_high || cfg.limits.compaction_low >= cfg.limits.compaction_high {
+        if cfg.turn.native && cfg.turn.profile != "host" {
+            return msg("turn.native = true needs turn.profile = \"host\"");
+        }
+        if cfg.compactor.workers == 0 || cfg.limits.view_low >= cfg.limits.view_high || cfg.limits.compaction_low >= cfg.limits.compaction_high || cfg.limits.raw_low >= cfg.limits.raw_high {
             return msg("config: workers must be positive and each low mark below its high mark");
         }
         Ok(cfg)

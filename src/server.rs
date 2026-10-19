@@ -97,6 +97,9 @@ pub async fn serve(engine: Arc<Engine>) -> Result<()> {
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).map_err(Error::from)?;
     let pump = tokio::spawn(engine.clone().pump());
+    if engine.cfg.turn.watch_units {
+        crate::units::resume(&engine);
+    }
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     eprintln!("endchat: serving {} ({} messages)", engine.dir.display(), engine.status().messages);
     loop {

@@ -11,6 +11,7 @@ mod log;
 mod memory;
 mod profile;
 mod prompts;
+mod raw;
 mod sched;
 mod server;
 mod sim;
@@ -19,6 +20,7 @@ mod store;
 mod testkit;
 mod tree;
 mod turn;
+mod units;
 mod util;
 mod view;
 

@@ -204,18 +204,21 @@ fn run_args(engine: &Engine, prompt_file: PathBuf, parts: bool, label: u64) -> R
         effort: t.effort.clone(),
         profile: t.profile.clone(),
         no_web: t.no_web,
-        tools: Some(t.tools.clone()),
-        system_prompt_file: Some(engine.system_file.clone()),
+        tools: (!t.native).then(|| t.tools.clone()),
+        system_prompt_file: (!t.native).then(|| engine.system_file.clone()),
         prompt_file,
         parts,
         timeout: t.timeout,
-        task: (t.profile != "sealed").then(|| format!("endchat-turn-{label}")),
+        task: (t.profile != "sealed" && !t.native).then(|| format!("endchat-turn-{label}")),
+        workdir: if t.native { t.workdir.clone() } else { None },
+        native_state: t.native,
     }
 }
 
 fn turn_aop(engine: &Engine) -> crate::aop::Aop {
     let t = &engine.cfg.turn;
-    let cwd = if t.profile == "sealed" { engine.dir.clone() } else { t.workdir.clone().unwrap_or_else(|| engine.dir.clone()) };
+    // A native run gets its working directory as `--workdir`, and its records stay in the profile.
+    let cwd = if t.profile == "sealed" || t.native { engine.dir.clone() } else { t.workdir.clone().unwrap_or_else(|| engine.dir.clone()) };
     crate::aop::Aop { bin: engine.cfg.aop_bin.clone(), cwd }
 }
 
@@ -232,8 +235,9 @@ fn log(engine: &Engine, tx: &UnboundedSender<TurnEvent>, kind: Kind, text: &str,
     Ok(())
 }
 
-/// Log what a run did, in order. Returns the calls the model made as text, taken from its final message.
-fn log_run(engine: &Engine, tx: &UnboundedSender<TurnEvent>, aop: &crate::aop::Aop, r: &AopResult) -> Result<Vec<ToolCall>> {
+/// Log what a run did, in order, and watch the units its tools started. Returns the calls the model
+/// made as text, taken from its final message.
+fn log_run(engine: &Arc<Engine>, tx: &UnboundedSender<TurnEvent>, aop: &crate::aop::Aop, r: &AopResult) -> Result<Vec<ToolCall>> {
     let events = std::fs::read_to_string(aop.events_path(&r.run_id)).map(|s| parse_claude(&s)).unwrap_or_default();
     if events.is_empty() {
         eprintln!("endchat: no readable events for run {}; logging its final message only", r.run_id);
@@ -251,7 +255,14 @@ fn log_run(engine: &Engine, tx: &UnboundedSender<TurnEvent>, aop: &crate::aop::A
                 }
             }
             Event::ToolCall { name, input } => log(engine, tx, Kind::Tool, &format!("{name} {input}"), &r.run_id)?,
-            Event::ToolResult(t) => log(engine, tx, Kind::Echo, &t, &r.run_id)?,
+            Event::ToolResult(t) => {
+                if engine.cfg.turn.watch_units {
+                    for name in crate::units::started(&t) {
+                        crate::units::watch(engine.clone(), name);
+                    }
+                }
+                log(engine, tx, Kind::Echo, &t, &r.run_id)?
+            }
         }
     }
     Ok(parse_calls(r.reply(), &cmds(engine)))
@@ -276,12 +287,23 @@ fn run_command(engine: &Engine, name: &str, arg: &str) -> String {
 }
 
 async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &UnboundedSender<TurnEvent>) -> Result<()> {
-    wait_for_summaries(engine).await;
-    let note = engine.cfg.turn.tail_note.as_deref().unwrap_or(TAIL_NOTE);
-    let tail = format!("<state>\ndate: {}\n{note}\n</state>\n{text}", date.map_or_else(now_iso, str::to_owned));
+    let t = &engine.cfg.turn;
+    // A raw prompt shows unsummarized messages as they are, so it need not wait for them.
+    if !t.raw {
+        wait_for_summaries(engine).await;
+    }
+    let note = t.tail_note.as_deref().unwrap_or(if t.raw { "" } else { TAIL_NOTE });
+    let tail = format!("<state>\ndate: {}\n{note}{}</state>\n{text}", date.map_or_else(now_iso, str::to_owned), if note.is_empty() { "" } else { "\n" });
     let (prompt, index) = {
         let mut m = engine.mem();
-        let prompt = if engine.cfg.turn.view { m.chat_prompt(&tail)? } else { crate::memory::view_prompt(&[], &tail) };
+        let prompt = if t.raw {
+            let l = &engine.cfg.limits;
+            crate::raw::prompt(&mut m, &crate::raw::Limits { stub_chars: t.stub_chars, high: l.raw_high, low: l.raw_low }, t.zoom, &tail)?
+        } else if t.view {
+            m.chat_prompt(&tail)?
+        } else {
+            crate::memory::view_prompt(&[], &tail)
+        };
         (prompt, m.log.len())
     };
     engine.append(Kind::User, text, None)?;
@@ -443,6 +465,31 @@ mod tests {
         assert!(calls[1]["prompt"].as_str().unwrap().starts_with("<result call=\"zoom(0, 2)\">\n0+1|user: hello"));
         assert_eq!(e.ledger().iter().filter(|l| l.kind == "turn").count(), 2);
         assert!(calls.iter().filter(|c| c["cmd"] == "cleanup").count() >= 2);
+    }
+
+    #[tokio::test]
+    async fn a_raw_native_turn_sends_the_history_as_marked_parts_with_the_harness_prompt() {
+        let fake = FakeAop::new(json!({"turn_replies": ["One.", "Two."]}));
+        let d = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.aop_bin = fake.aop().bin;
+        (cfg.turn.raw, cfg.turn.native, cfg.turn.profile, cfg.turn.allow_host) = (true, true, "host".into(), true);
+        cfg.turn.workdir = Some(d.path().join("work"));
+        std::fs::create_dir_all(d.path().join("work")).unwrap();
+        let e = Engine::open(d.path(), cfg).unwrap();
+        for text in ["first", "second"] {
+            let (tx, rx) = unbounded_channel();
+            say(e.clone(), text.into(), Some("2026-10-19T09:00:00Z".into()), tx).await.unwrap();
+            collect(rx).await;
+        }
+        let runs: Vec<_> = fake.calls().into_iter().filter(|c| c["cmd"] == "run").collect();
+        let prompt = runs[1]["prompt"].as_str().unwrap();
+        assert!(prompt.contains("0|user: first\n1|agent: One.\n</chat>\n<state>\ndate: 2026-10-19T09:00:00Z\n</state>\nsecond"), "{prompt}");
+        assert_eq!(runs[1]["marks"], 1);
+        assert!(runs[1]["system"].is_null());
+        let args: Vec<&str> = runs[1]["args"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
+        assert!(!args.contains(&"--tools") && !args.contains(&"--system-prompt-file"), "{args:?}");
+        assert!(args.contains(&"--native-state") && args.contains(&d.path().join("work").to_str().unwrap()));
     }
 
     #[tokio::test]

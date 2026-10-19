@@ -111,6 +111,7 @@ impl Compactor {
                     parts,
                     timeout: self.settings.timeout,
                     task: None,
+                    ..Default::default()
                 };
                 self.aop.run(&args).await
             }
