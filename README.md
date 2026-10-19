@@ -85,6 +85,8 @@ With `raw = true` a turn sends the chat itself, each message as `id|kind: text`,
 
 With `native = true` as well, turns run as Claude Code does on its own in `workdir`, through `aop --workdir --native-state`, while the run records stay in the profile. Its sessions then appear among the user's own Claude Code sessions for that directory.
 
+`contrib/claude_session.py SESSION.jsonl > history.json` turns a Claude Code session transcript into a file for `endchat import`, so an existing session's history can continue in endchat.
+
 With `watch_units = true`, a tool result containing `Running as unit: NAME`, which `systemd-run` prints, makes endchat poll that unit and send a `[systemd]` message when it stops, which starts a turn. Watched units are kept in `units.txt` across restarts.
 
 ## What is stored
