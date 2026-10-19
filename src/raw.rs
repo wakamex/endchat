@@ -1,7 +1,8 @@
 //! The raw-history prompt: the chat so far word for word instead of the view of summaries.
 //!
 //! Tool results longer than `stub_chars` are replaced by a one-line stub once they are older than
-//! the previous turn. When the raw part passes `high` bytes, its oldest turns are cut off until
+//! the previous turn, and tool calls that long, such as a command that writes a whole script, are
+//! cut to their start. When the raw part passes `high` bytes, its oldest turns are cut off until
 //! under `low` bytes remain, and one call summarizes what was cut, together with the summary of
 //! any earlier cut. The cut and that summary are kept in `raw.json`, so every turn until the next
 //! cut sends the same prefix.
@@ -38,9 +39,17 @@ struct Saved {
 /// history as real conversation turns, and shorter and less often than a neutral description.
 const INTRO: &str = "<chat>\nThis is the conversation you have been taking part in, oldest first, one message per entry as `id|kind: text`. `agent` entries are your own earlier replies, exactly as you sent them; `tool` and `echo` entries are your tool calls and their results; `user` entries are the messages you received; `work` and `note` entries are reports and notes. A large tool result older than the previous turn is replaced by a stub: run the call again if you need it. The message after </chat> is the next one you received. Your final response is your next `agent` entry: follow the same instructions and rules your earlier replies followed, and match their length and style.\n";
 
-/// The message as one transcript entry, with a stub in place of a long old result.
+/// Characters an old long tool call keeps: enough to name the tool and show what it ran.
+const CALL_HEAD: usize = 200;
+
+/// The message as one transcript entry, with a stub in place of a long old result and only the
+/// start of a long old call.
 fn entry(m: &Message, call: Option<&Message>, stub: bool, lim: &Limits) -> String {
     let chars = m.text.chars().count();
+    if stub && m.kind == Kind::Tool && chars > lim.stub_chars.max(CALL_HEAD) {
+        let head: String = m.text.chars().take(CALL_HEAD).collect();
+        return format!("{}|tool: {head} [... {chars} characters in all]\n", m.i);
+    }
     if stub && m.kind == Kind::Echo && chars > lim.stub_chars {
         return match call {
             Some(c) => format!("{}|echo: [stub: {chars} characters returned by {} in message {}]\n", m.i, c.text.split_whitespace().next().unwrap_or("the call"), c.i),
@@ -278,6 +287,24 @@ mod tests {
         }
         let lim = Limits { stub_chars: 1000, high: 60_000, low: 10_000 };
         assert_eq!(due_cut(&mut m, &lim).unwrap().unwrap().0, 40);
+    }
+
+    #[test]
+    fn a_long_old_call_keeps_only_its_start() {
+        let d = tempfile::tempdir().unwrap();
+        let mut m = mem(d.path());
+        let script = format!("Bash {{\"command\":\"cat > plot.py <<'E'\\n{}\"}}", "x = 1\\n".repeat(100));
+        for user in ["first", "second", "third"] {
+            m.append(Kind::User, user, None).unwrap();
+            m.append(Kind::Tool, &script, Some("r")).unwrap();
+            m.append(Kind::Echo, "ok", Some("r")).unwrap();
+        }
+        let lim = Limits { stub_chars: 300, ..LIM };
+        let text = prompt(&mut m, &lim, "t").unwrap().text();
+        let head: String = script.chars().take(200).collect();
+        let stub = format!("|tool: {head} [... {} characters in all]\n", script.chars().count());
+        assert!(text.contains(&format!("1{stub}")) && text.contains(&format!("4{stub}")), "{text}");
+        assert!(text.contains(&format!("7|tool: {script}\n")), "the previous turn keeps its call whole");
     }
 
     #[test]
