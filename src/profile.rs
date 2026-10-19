@@ -83,9 +83,10 @@ pub struct Turn {
     /// Watch the systemd units a turn's tools start (`Running as unit: NAME`) and send a message
     /// when each one stops.
     pub watch_units: bool,
-    /// With `native`: delete each turn's Claude Code session files once the turn ends. Each holds
-    /// the whole prompt, so kept they would grow the session store and repeat the chat in searches.
-    pub prune_sessions: bool,
+    /// With `native`: once a turn ends, replace the history in endchat's prompt, as the turn's
+    /// Claude Code session files keep it, with a one-line stub. Kept whole, each file would hold the
+    /// whole prompt, growing the session store and repeating the chat in searches.
+    pub stub_sessions: bool,
 }
 
 impl Default for Turn {
@@ -110,7 +111,7 @@ impl Default for Turn {
             stub_chars: 1000,
             native: false,
             watch_units: false,
-            prune_sessions: false,
+            stub_sessions: false,
         }
     }
 }

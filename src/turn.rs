@@ -393,27 +393,74 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             aop.cleanup(id).await;
         }
     }
-    if t.native && t.prune_sessions {
-        prune_sessions(&aop, &runs);
+    if t.native && t.stub_sessions {
+        if let Some(store) = session_store() {
+            stub_sessions(&store, &session_ids(&aop, &runs));
+        }
     }
     outcome
 }
 
-/// Delete the Claude Code session files of `runs`, found by the session id each run's events name,
-/// in every project folder of the session store (`$CLAUDE_CONFIG_DIR` or `~/.claude`).
-fn prune_sessions(aop: &crate::aop::Aop, runs: &[String]) {
-    let ids: std::collections::BTreeSet<String> = runs
-        .iter()
+/// The session store holding Claude Code's session files: `$CLAUDE_CONFIG_DIR` or `~/.claude`.
+fn session_store() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))
+}
+
+/// The session ids the events of `runs` name.
+fn session_ids(aop: &crate::aop::Aop, runs: &[String]) -> std::collections::BTreeSet<String> {
+    runs.iter()
         .filter_map(|r| std::fs::read_to_string(aop.events_path(r)).ok())
         .filter_map(|events| events.lines().find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()?.get("session_id")?.as_str().map(str::to_owned)))
         .filter(|id| !id.is_empty() && !id.contains('/'))
-        .collect();
-    let store = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")));
-    let Some(projects) = store.map(|s| s.join("projects")) else { return };
-    for dir in std::fs::read_dir(projects).into_iter().flatten().flatten() {
-        for id in &ids {
-            let _ = std::fs::remove_file(dir.path().join(format!("{id}.jsonl")));
-            let _ = std::fs::remove_dir_all(dir.path().join(id));
+        .collect()
+}
+
+/// The prompt endchat sent, as a record's text blocks show it, with the history before `</chat>`
+/// replaced by a one-line note; None when the content is not an endchat prompt.
+fn stubbed(content: &serde_json::Value) -> Option<serde_json::Value> {
+    let text: String = match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => blocks.iter().filter_map(|b| b.get("text").and_then(|t| t.as_str())).collect(),
+        _ => return None,
+    };
+    let (history, tail) = text.strip_prefix("<chat>\n")?.rsplit_once("</chat>\n")?;
+    let note = format!("[endchat history: {} characters, kept in the profile's log]\n", history.chars().count());
+    Some(serde_json::json!([{ "type": "text", "text": note + tail }]))
+}
+
+/// In the session files of `ids` under `store`, replace the history in endchat's prompt, kept in
+/// the user record and in the stored copy of the request, with a stub. Replies, tool calls and
+/// usage stay as they are.
+fn stub_sessions(store: &std::path::Path, ids: &std::collections::BTreeSet<String>) {
+    for dir in std::fs::read_dir(store.join("projects")).into_iter().flatten().flatten() {
+        for id in ids {
+            let path = dir.path().join(format!("{id}.jsonl"));
+            let Ok(old) = std::fs::read_to_string(&path) else { continue };
+            let mut changed = false;
+            let lines: Vec<String> = old
+                .lines()
+                .map(|l| {
+                    let Ok(mut r) = serde_json::from_str::<serde_json::Value>(l) else { return l.to_owned() };
+                    if !matches!(r.get("type").and_then(|t| t.as_str()), Some("user" | "api-request-blob")) {
+                        return l.to_owned();
+                    }
+                    match r.pointer("/message/content").and_then(stubbed) {
+                        Some(new) => {
+                            r["message"]["content"] = new;
+                            changed = true;
+                            r.to_string()
+                        }
+                        None => l.to_owned(),
+                    }
+                })
+                .collect();
+            if changed {
+                let tmp = path.with_extension("jsonl.tmp");
+                if std::fs::write(&tmp, lines.join("\n") + "\n").and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                    eprintln!("endchat: could not stub the prompt in {}", path.display());
+                }
+            }
         }
     }
 }
@@ -540,6 +587,29 @@ mod tests {
         let args: Vec<&str> = runs[1]["args"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
         assert!(!args.contains(&"--tools") && !args.contains(&"--system-prompt-file"), "{args:?}");
         assert!(args.contains(&"--native-state") && args.contains(&d.path().join("work").to_str().unwrap()));
+    }
+
+    #[test]
+    fn a_session_file_keeps_everything_but_the_history_in_endchats_prompt() {
+        let store = tempfile::tempdir().unwrap();
+        let dir = store.path().join("projects").join("-work");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prompt = json!([{"type": "text", "text": "<chat>\n0|user: hello\n"}, {"type": "text", "text": "1|agent: hi\n</chat>\n<state>\ndate: d\n</state>\nnew message"}]);
+        let records = [
+            json!({"type": "user", "message": {"role": "user", "content": prompt}}),
+            json!({"type": "api-request-blob", "hash": "h", "message": {"role": "user", "content": prompt}}),
+            json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "<chat>\nnot a prompt</chat>\n"}]}}),
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "reply"}], "usage": {"input_tokens": 5}}}),
+        ];
+        let file = dir.join("sid.jsonl");
+        std::fs::write(&file, records.iter().map(|r| r.to_string() + "\n").collect::<String>()).unwrap();
+        std::fs::write(dir.join("other.jsonl"), records[0].to_string() + "\n").unwrap();
+        stub_sessions(store.path(), &["sid".to_owned()].into());
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&file).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let stub = json!([{"type": "text", "text": "[endchat history: 26 characters, kept in the profile's log]\n<state>\ndate: d\n</state>\nnew message"}]);
+        assert_eq!((&lines[0]["message"]["content"], &lines[1]["message"]["content"]), (&stub, &stub));
+        assert_eq!((&lines[2], &lines[3]), (&records[2], &records[3]), "tool results and replies stay");
+        assert!(std::fs::read_to_string(dir.join("other.jsonl")).unwrap().contains("0|user: hello"), "other sessions stay");
     }
 
     #[tokio::test]

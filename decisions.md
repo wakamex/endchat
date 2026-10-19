@@ -74,7 +74,7 @@ The live check (`src/live.rs`) generated a labeled synthetic 300-message chat wi
 ## Decisions about raw history
 
 1. A raw-history cut summarizes what it removes in one call, at a turn boundary, and keeps that summary until the next cut. The per-message summary tree adds little to recall when the model can search the log (the debate benchmark found the view held what a reply needed in 20 of 228 cases), but dropping the cut part with nothing left loses what was being done and decided. One call per cut keeps that at the cost of a few cents a cut, not a call per message. Its instructions follow the sections of Claude Code's compaction summary, rewritten for a chat; Claude Code's own text is not copied.
-2. With native turns, each turn's Claude Code session file holds the whole prompt, up to `raw_high` bytes. `prune_sessions` deletes them by the session ids in the turn's run records, so the session store does not grow by that much a turn and searches over it do not find each message once per later turn.
+2. With native turns, each turn's Claude Code session file holds the whole prompt, up to `raw_high` bytes, twice: in the user record and in the stored copy of the request. `stub_sessions` replaces the history in both with a one-line stub, found by the session ids in the turn's run records, so the session store does not grow by that much a turn and searches over it do not find each message once per later turn, while the new message, replies, tool calls and usage stay for tools that read the store. Deleting the files instead would have hidden the chat from those tools.
 
 ## Not done
 
