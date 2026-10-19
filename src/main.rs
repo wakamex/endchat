@@ -59,6 +59,10 @@ enum Command {
         /// as a live chat would; 0 appends everything at once
         #[arg(long, default_value_t = 25)]
         pace: usize,
+        /// With turn.raw, into an empty profile: a summary of the chat before this history, which
+        /// raw prompts then start with until their first cut
+        #[arg(long)]
+        summary: Option<PathBuf>,
     },
     /// Send a message and print the reply (runs the turn itself when no server is running)
     Say {
@@ -167,7 +171,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let (_, engine) = open_engine(&profile)?;
             server::serve(engine).await?;
         }
-        Command::Import { profile, file, timeout_secs, pace } => return import(&profile, &file, timeout_secs, pace).await,
+        Command::Import { profile, file, timeout_secs, pace, summary } => return import(&profile, &file, timeout_secs, pace, summary.as_deref()).await,
         Command::Say { profile, text, date, verbose } => {
             let text = text.join(" ");
             if text.trim().is_empty() {
@@ -256,9 +260,15 @@ struct Imported {
 }
 
 /// Append a history file, let the workers summarize it, and report what that cost.
-async fn import(profile: &str, file: &std::path::Path, timeout_secs: u64, pace: usize) -> Result<ExitCode> {
+async fn import(profile: &str, file: &std::path::Path, timeout_secs: u64, pace: usize, summary: Option<&std::path::Path>) -> Result<ExitCode> {
     let items: Vec<Imported> = serde_json::from_str(&std::fs::read_to_string(file)?).map_err(Error::from)?;
-    let (_, engine) = open_engine(profile)?;
+    let (dir, engine) = open_engine(profile)?;
+    if let Some(path) = summary {
+        if !engine.cfg.turn.raw || engine.mem().log.len() > 0 || dir.join("raw.json").exists() {
+            return Err(Error::Msg("--summary needs turn.raw and an empty profile".into()));
+        }
+        raw::save_cut(&dir, 0, &std::fs::read_to_string(path)?)?;
+    }
     let started = std::time::Instant::now();
     let before = engine.ledger().len();
     let existing = engine.mem().log.len();

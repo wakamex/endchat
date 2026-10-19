@@ -159,7 +159,8 @@ pub fn prompt(mem: &mut Memory, lim: &Limits, tail: &str) -> Result<Prompt> {
     let h = history(mem, s.cut, lim)?;
     let mut head = INTRO.to_owned();
     if !s.summary.is_empty() {
-        head += &format!("The chat before message {} is summarized here; the messages themselves are kept in full in the log.\n<summary>\n{}\n</summary>\n", s.cut, s.summary);
+        let before = if s.cut == 0 { "before this log began".to_owned() } else { format!("before message {}", s.cut) };
+        head += &format!("The chat {before} is summarized here; the messages themselves are kept in full in the log.\n<summary>\n{}\n</summary>\n", s.summary);
     }
     let mut parts = vec![(head, false)];
     let mut bounds = h.turns.clone();

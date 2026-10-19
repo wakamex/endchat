@@ -88,7 +88,7 @@ With `raw = true` a turn sends the chat itself, each message as `id|kind: text`,
 
 With `native = true` as well, turns run as Claude Code does on its own in `workdir`, through `aop --workdir --native-state`, while the run records stay in the profile. Each turn is a Claude Code session of its own whose file holds the whole prompt; `stub_sessions = true` replaces that history with a one-line stub when the turn ends, keeping the new message, replies, tool calls and usage, so the files neither pile up nor repeat the chat in session searches, and usage tools still read every turn. `endchat search` searches the profile's own log instead.
 
-`contrib/claude_session.py SESSION.jsonl > history.json` turns a Claude Code session transcript into a file for `endchat import`, so an existing session's history can continue in endchat.
+`contrib/claude_session.py SESSION.jsonl > history.json` turns a Claude Code session transcript into a file for `endchat import`, so an existing session's history can continue in endchat. With `--after-compaction summary.md` it keeps only what follows the session's last compaction and saves that compaction's summary, without Claude Code's resume instructions; `endchat import --summary summary.md` then seeds a raw profile with it, so endchat starts from the state the session was in.
 
 With `watch_units = true`, a tool result containing `Running as unit: NAME`, which `systemd-run` prints, makes endchat poll that unit and send a `[systemd]` message when it stops, which starts a turn. Watched units are kept in `units.txt` across restarts.
 
