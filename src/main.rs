@@ -333,26 +333,37 @@ async fn import(profile: &str, file: &std::path::Path, timeout_secs: u64, pace: 
     Ok(if done { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
-/// Print one event of a `say`; returns false for an error.
-fn show(v: &Value, verbose: bool) -> bool {
+/// How `chat` shows one event of a `say`, or None for an event it leaves out.
+fn chat_line(v: &Value, verbose: bool) -> Option<String> {
     let t = v["text"].as_str().unwrap_or("");
     match v["event"].as_str() {
-        Some("agent") => println!("{t}\n"),
-        Some("tool") if verbose => eprintln!("> {t}"),
-        Some("echo") if verbose => eprintln!("< {}", t.lines().take(20).collect::<Vec<_>>().join("\n< ")),
-        Some("queued") => eprintln!("(queued: a turn is running; the message reaches it between tool calls)"),
-        Some("error") => {
-            eprintln!("error: {t}");
-            return false;
-        }
-        _ => {}
+        Some("agent") => Some(format!("{t}\n")),
+        Some("tool") if verbose => Some(format!("> {t}")),
+        Some("echo") if verbose => Some(format!("< {}", t.lines().take(20).collect::<Vec<_>>().join("\n< "))),
+        Some("queued") => Some("(queued: a turn is running; the message reaches it between tool calls)".into()),
+        Some("error") => Some(format!("error: {t}")),
+        _ => None,
     }
-    true
 }
 
-/// A line-based chat with one profile. Through its server when one runs; otherwise this process
-/// owns the profile, with its compaction workers, until the chat ends.
+type Printer = std::sync::Arc<std::sync::Mutex<Option<Box<dyn rustyline::ExternalPrinter + Send>>>>;
+
+/// Show a line above the prompt while one is being typed, or print it when there is no terminal.
+fn chat_print(printer: &Printer, line: String) {
+    match printer.lock().expect("printer lock poisoned").as_mut() {
+        Some(p) => {
+            let _ = p.print(line + "\n");
+        }
+        None => println!("{line}"),
+    }
+}
+
+/// A line-based chat with one profile. Lines are read on their own thread, so a message can be
+/// typed while a turn runs and reaches it as a queued message; replies print above the prompt.
+/// Through the profile's server when one runs; otherwise this process owns the profile, with its
+/// compaction workers, until the chat ends.
 async fn chat(profile: &str, verbose: bool) -> Result<ExitCode> {
+    use std::io::IsTerminal;
     let dir = Profile::locate(profile)?;
     let local = match server::ask(&dir, &json!({"cmd": "status"}), |_| {}).await? {
         true => None,
@@ -366,44 +377,63 @@ async fn chat(profile: &str, verbose: bool) -> Result<ExitCode> {
     let history = dir.join("chat-history.txt");
     let mut editor = rustyline::DefaultEditor::new().map_err(|e| Error::Msg(e.to_string()))?;
     let _ = editor.load_history(&history);
-    loop {
-        let line = match editor.readline("> ") {
-            Ok(l) => l,
-            Err(rustyline::error::ReadlineError::Interrupted) => continue,
-            Err(_) => break,
-        };
-        let text = line.trim();
-        if text.is_empty() {
-            continue;
+    let printer: Printer = std::sync::Arc::new(std::sync::Mutex::new(match std::io::stdin().is_terminal() {
+        true => editor.create_external_printer().ok().map(|p| Box::new(p) as Box<dyn rustyline::ExternalPrinter + Send>),
+        false => None,
+    }));
+    let (send, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let input = std::thread::spawn(move || {
+        loop {
+            match editor.readline("› ") {
+                Ok(line) if line.trim().is_empty() => {}
+                Ok(line) => {
+                    let _ = editor.add_history_entry(line.trim());
+                    if send.send(line.trim().to_owned()).is_err() {
+                        break;
+                    }
+                }
+                Err(rustyline::error::ReadlineError::Interrupted) => {}
+                Err(_) => break,
+            }
         }
-        let _ = editor.add_history_entry(text);
+        let _ = editor.save_history(&history);
+    });
+    let mut turns = tokio::task::JoinSet::new();
+    while let Some(text) = lines.recv().await {
         let req = json!({"cmd": "say", "text": text});
+        let printer = printer.clone();
         match &local {
             None => {
-                if !server::ask(&dir, &req, |v| {
-                    show(&v, verbose);
-                })
-                .await?
-                {
-                    eprintln!("error: the server stopped; run endchat serve {profile} or chat again");
-                    break;
-                }
+                let dir = dir.clone();
+                turns.spawn(async move {
+                    let shown = server::ask(&dir, &req, |v| {
+                        if let Some(l) = chat_line(&v, verbose) {
+                            chat_print(&printer, l);
+                        }
+                    });
+                    if !matches!(shown.await, Ok(true)) {
+                        chat_print(&printer, "error: the server is not answering; start it with endchat serve, or chat again".into());
+                    }
+                });
             }
             Some((engine, _)) => {
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-                let request: server::Request = serde_json::from_value(req).map_err(Error::from)?;
-                let turn = tokio::spawn({
-                    let engine = engine.clone();
-                    async move { server::handle(&engine, request, tx).await }
+                let engine = engine.clone();
+                turns.spawn(async move {
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                    let Ok(request) = serde_json::from_value::<server::Request>(req) else { return };
+                    let turn = tokio::spawn(async move { server::handle(&engine, request, tx).await });
+                    while let Some(v) = rx.recv().await {
+                        if let Some(l) = chat_line(&v, verbose) {
+                            chat_print(&printer, l);
+                        }
+                    }
+                    let _ = turn.await;
                 });
-                while let Some(v) = rx.recv().await {
-                    show(&v, verbose);
-                }
-                let _ = turn.await;
             }
         }
     }
-    let _ = editor.save_history(&history);
+    while turns.join_next().await.is_some() {}
+    let _ = input.join();
     if let Some((engine, pump)) = local {
         engine.stop();
         let _ = pump.await;
