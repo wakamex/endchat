@@ -34,10 +34,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(version, about = "A chat that never ends: every message logged, memory kept as a tree of summaries, every model call made through AOP")]
+#[command(version, about = "A chat that never ends: every message logged, memory kept as a tree of summaries, every model call made through AOP. With no command, chat with the profile main.")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    /// With no command: also print tool calls and their results while chatting with `main`
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(Subcommand)]
@@ -174,7 +177,9 @@ async fn query(profile: &str, req: Value) -> Result<Vec<Value>> {
 }
 
 async fn run(cli: Cli) -> Result<ExitCode> {
-    match cli.command {
+    // With no command, chat with the default profile.
+    let command = cli.command.unwrap_or(Command::Chat { profile: "main".into(), verbose: cli.verbose });
+    match command {
         Command::Serve { profile } => {
             let (_, engine) = open_engine(&profile)?;
             server::serve(engine).await?;

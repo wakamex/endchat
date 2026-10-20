@@ -21,6 +21,14 @@ fn help_lists_every_subcommand() {
 }
 
 #[test]
+fn no_command_chats_with_the_main_profile() {
+    let home = tempfile::tempdir().unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_endchat")).env("HOME", home.path()).stdin(std::process::Stdio::null()).output().unwrap();
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains(&format!("endchat chat: {}/.endchat/main", home.path().display())), "{}", text(&o));
+}
+
+#[test]
 fn status_zoom_and_check_open_an_idle_profile_directly() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().to_str().unwrap();

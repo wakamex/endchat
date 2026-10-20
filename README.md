@@ -17,9 +17,9 @@ endchat needs `aop` on the path and a logged-in harness for it to drive (version
 A profile is one chat. It lives in `~/.endchat/NAME/`, or in any directory when the name contains a `/`.
 
 ```
+endchat                     # chat with the profile main; endchat chat NAME for another
 endchat serve main          # owns the profile: lock, compaction workers, control socket
 endchat say main "what did I decide about the staging database?"
-endchat chat main           # interactive: each line is a message, replies print as they arrive
 endchat status main
 endchat zoom main 40 8      # what the model sees for zoom(40, 8)
 endchat check main          # log, tree, and views against each other
@@ -29,7 +29,7 @@ endchat sim                 # synthetic chat against a model of the prompt cache
 
 `contrib/endchat@.service` is a systemd user unit that runs one `serve` per profile.
 
-`say` prints the reply; `chat` does the same for each line typed, with `-v` for tool calls and their results, and works with or without a running server. A message sent while a turn runs is queued and reaches that turn between tool calls, or starts the next turn.
+`say` prints the reply; `endchat`, or `endchat chat NAME`, does the same for each line typed, with `-v` for tool calls and their results, and works with or without a running server. A message sent while a turn runs is queued and reaches that turn between tool calls, or starts the next turn.
 
 ## Configuration
 
