@@ -109,15 +109,20 @@ pub fn parse_result(stdout: &str) -> Result<AopResult> {
 
 impl Aop {
     async fn exec(&self, argv: &[String], timeout: u64) -> Result<AopResult> {
-        let child = Command::new(&self.bin)
-            .args(argv)
-            .current_dir(&self.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| Error::Aop(format!("cannot start {}: {e}", self.bin)))?;
+        let spawn = || Command::new(&self.bin).args(argv).current_dir(&self.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn();
+        let mut child = spawn();
+        // A script just written can be busy for a moment while another thread's child still holds
+        // its write descriptor between fork and exec (ETXTBSY); starting again succeeds.
+        for _ in 0..5 {
+            match &child {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    child = spawn();
+                }
+                _ => break,
+            }
+        }
+        let child = child.map_err(|e| Error::Aop(format!("cannot start {}: {e}", self.bin)))?;
         let out = tokio::time::timeout(Duration::from_secs(timeout + 60), child.wait_with_output())
             .await
             .map_err(|_| Error::Aop(format!("no result {timeout}s after the deadline")))??;
