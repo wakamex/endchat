@@ -209,7 +209,13 @@ mod tests {
         let first = Profile::open(d.path()).unwrap();
         assert!(matches!(Profile::open(d.path()), Err(Error::Locked)));
         drop(first);
-        Profile::open(d.path()).unwrap();
+        // A child another test is starting can hold the lock file for an instant, between fork and
+        // exec, as every child inherits open descriptors until exec closes them.
+        let reopened = (0..50).find_map(|_| Profile::open(d.path()).ok().or_else(|| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            None
+        }));
+        assert!(reopened.is_some(), "the lock was not released");
     }
 
     #[test]
