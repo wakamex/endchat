@@ -15,7 +15,7 @@ fn help_lists_every_subcommand() {
     let o = endchat(&["--help"]);
     assert!(o.status.success());
     let t = text(&o);
-    for cmd in ["serve", "say", "status", "zoom", "check", "sim"] {
+    for cmd in ["serve", "say", "chat", "status", "zoom", "check", "search", "sim"] {
         assert!(t.contains(cmd), "{cmd} missing from help:\n{t}");
     }
 }
@@ -71,4 +71,33 @@ fn import_loads_dated_history_and_summarizes_short_messages_for_free() {
     let o = endchat(&["zoom", p, "0", "1"]);
     assert_eq!(text(&o), "user: I graduated in Business Administration");
     assert!(text(&endchat(&["check", p])).starts_with("ok:"));
+}
+
+#[test]
+fn chat_without_a_server_answers_each_line_and_keeps_its_history() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("scenario.json"), r#"{"turn_replies": ["Hi there.", "Still here."]}"#).unwrap();
+    let aop = dir.path().join("aop");
+    std::fs::write(&aop, format!("#!/bin/sh\nexport FAKE_AOP_DIR='{}'\nexec python3 '{}/tests/fake_aop.py' \"$@\"\n", state.display(), env!("CARGO_MANIFEST_DIR"))).unwrap();
+    std::fs::set_permissions(&aop, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let profile = dir.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join("config.toml"), format!("aop_bin = \"{}\"\n", aop.display())).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_endchat"))
+        .args(["chat", profile.to_str().unwrap()])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"hello\n\nare you there?\n").unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", text(&o));
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(out.contains("Hi there.") && out.contains("Still here."), "{}", text(&o));
+    assert!(text(&o).contains("no server running, so this process owns the profile"));
+    assert!(text(&endchat(&["status", profile.to_str().unwrap()])).starts_with("messages: 4\n"), "two exchanges are logged");
 }

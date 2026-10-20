@@ -75,6 +75,14 @@ enum Command {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// Chat interactively: each line is a message, and replies print as they arrive
+    /// (talks to the running server, or owns the profile itself when none runs)
+    Chat {
+        profile: String,
+        /// Also print tool calls and their results
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Message count, view size, unsummarized count, running calls, cache ratios, last error
     Status { profile: String },
     /// Print what the model would see for zoom(ID, N)
@@ -210,6 +218,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             return Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS });
         }
+        Command::Chat { profile, verbose } => return chat(&profile, verbose).await,
         Command::Status { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "status"})).await?)),
         Command::Zoom { profile, id, n, offset } => return Ok(print_reply(query(&profile, json!({"cmd": "zoom", "id": id, "n": n, "offset": offset})).await?)),
         Command::Check { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "check"})).await?)),
@@ -322,6 +331,85 @@ async fn import(profile: &str, file: &std::path::Path, timeout_secs: u64, pace: 
     });
     println!("{report}");
     Ok(if done { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
+/// Print one event of a `say`; returns false for an error.
+fn show(v: &Value, verbose: bool) -> bool {
+    let t = v["text"].as_str().unwrap_or("");
+    match v["event"].as_str() {
+        Some("agent") => println!("{t}\n"),
+        Some("tool") if verbose => eprintln!("> {t}"),
+        Some("echo") if verbose => eprintln!("< {}", t.lines().take(20).collect::<Vec<_>>().join("\n< ")),
+        Some("queued") => eprintln!("(queued: a turn is running; the message reaches it between tool calls)"),
+        Some("error") => {
+            eprintln!("error: {t}");
+            return false;
+        }
+        _ => {}
+    }
+    true
+}
+
+/// A line-based chat with one profile. Through its server when one runs; otherwise this process
+/// owns the profile, with its compaction workers, until the chat ends.
+async fn chat(profile: &str, verbose: bool) -> Result<ExitCode> {
+    let dir = Profile::locate(profile)?;
+    let local = match server::ask(&dir, &json!({"cmd": "status"}), |_| {}).await? {
+        true => None,
+        false => {
+            let (_, engine) = open_engine(profile)?;
+            let pump = tokio::spawn(engine.clone().pump());
+            Some((engine, pump))
+        }
+    };
+    eprintln!("endchat chat: {} ({}). Each line is a message; Ctrl-D ends.", dir.display(), if local.is_some() { "no server running, so this process owns the profile" } else { "through its server" });
+    let history = dir.join("chat-history.txt");
+    let mut editor = rustyline::DefaultEditor::new().map_err(|e| Error::Msg(e.to_string()))?;
+    let _ = editor.load_history(&history);
+    loop {
+        let line = match editor.readline("> ") {
+            Ok(l) => l,
+            Err(rustyline::error::ReadlineError::Interrupted) => continue,
+            Err(_) => break,
+        };
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let _ = editor.add_history_entry(text);
+        let req = json!({"cmd": "say", "text": text});
+        match &local {
+            None => {
+                if !server::ask(&dir, &req, |v| {
+                    show(&v, verbose);
+                })
+                .await?
+                {
+                    eprintln!("error: the server stopped; run endchat serve {profile} or chat again");
+                    break;
+                }
+            }
+            Some((engine, _)) => {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let request: server::Request = serde_json::from_value(req).map_err(Error::from)?;
+                let turn = tokio::spawn({
+                    let engine = engine.clone();
+                    async move { server::handle(&engine, request, tx).await }
+                });
+                while let Some(v) = rx.recv().await {
+                    show(&v, verbose);
+                }
+                let _ = turn.await;
+            }
+        }
+    }
+    let _ = editor.save_history(&history);
+    if let Some((engine, pump)) = local {
+        engine.stop();
+        let _ = pump.await;
+        engine.mem().save_views()?;
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_reply(lines: Vec<Value>) -> ExitCode {
