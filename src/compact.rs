@@ -12,16 +12,22 @@ use tokio::sync::oneshot;
 
 pub const MAX_ATTEMPTS: usize = 5;
 
-/// What a raw history's cut asks for after the chat being cut: an analysis, then a summary.
+/// What a raw history's cut asks for, before the chat being cut: an analysis, then a summary.
 const CUT: &str = include_str!("../prompts/cut.md");
 
-/// The `<summary>` of a reply to the cut prompt, without its `<analysis>`.
-pub fn cut_summary(reply: &str) -> String {
-    let body = match (reply.find("<summary>"), reply.rfind("</summary>")) {
-        (Some(a), Some(b)) if a < b => &reply[a + "<summary>".len()..b],
-        _ => reply.rsplit_once("</analysis>").map_or(reply, |(_, s)| s),
-    };
-    body.trim().to_owned()
+/// The system prompt of a cut's summary call: who it writes for, and that the chat is material.
+const CUT_SYSTEM: &str = include_str!("../prompts/cut_system.md");
+
+/// Calls made for one cut before it waits for a later turn.
+const CUT_ATTEMPTS: usize = 3;
+
+/// The `<summary>` block of a reply to the cut prompt; None when the reply has none, as a refusal
+/// or an answer to the chat would not, so that no such reply is ever kept as a summary.
+pub fn cut_summary(reply: &str) -> Option<String> {
+    let a = reply.find("<summary>")? + "<summary>".len();
+    let b = reply.rfind("</summary>")?;
+    let body = reply.get(a..b)?.trim();
+    (!body.is_empty()).then(|| body.to_owned())
 }
 
 /// Strip an `id+n|` head the model may have copied from the view, and surrounding whitespace.
@@ -136,9 +142,12 @@ impl Compactor {
     /// One call that summarizes `chat`, the part of a raw history being cut, as `prompts/cut.md`
     /// asks, under the harness's own system prompt with no tools.
     pub async fn summarize(&self, chat: &str, timeout: u64) -> (std::result::Result<String, String>, Vec<Call>) {
-        let file = match self.prompt_file(&format!("<chat>\n{chat}</chat>\n\n{CUT}")) {
+        let mut calls = Vec::new();
+        let mut why = String::new();
+        let files = self.prompt_file(&format!("{CUT}\n<chat>\n{chat}</chat>\n")).and_then(|p| Ok((p, self.prompt_file(CUT_SYSTEM)?)));
+        let (file, system) = match files {
             Ok(f) => f,
-            Err(e) => return (Err(e.to_string()), Vec::new()),
+            Err(e) => return (Err(e.to_string()), calls),
         };
         let args = RunArgs {
             agent: self.settings.agent.clone(),
@@ -147,27 +156,34 @@ impl Compactor {
             profile: "sealed".into(),
             no_web: true,
             tools: Some(String::new()),
+            system_prompt_file: Some(system.clone()),
             prompt_file: file.clone(),
             timeout,
             ..Default::default()
         };
-        let r = self.aop.run(&args).await;
+        let mut out = None;
+        for _ in 0..CUT_ATTEMPTS {
+            let r = match self.aop.run(&args).await {
+                Ok(r) => r,
+                Err(e) => {
+                    why = e.to_string();
+                    continue;
+                }
+            };
+            self.aop.cleanup(&r.run_id).await;
+            calls.push(Call::of(&r));
+            match (r.succeeded, cut_summary(r.reply())) {
+                (true, Some(s)) => {
+                    out = Some(s);
+                    break;
+                }
+                (true, None) => why = format!("run {} answered without a <summary> block: {}", r.run_id, r.reply().chars().take(200).collect::<String>()),
+                (false, _) => why = r.failure(),
+            }
+        }
         let _ = std::fs::remove_file(&file);
-        let r = match r {
-            Ok(r) => r,
-            Err(e) => return (Err(e.to_string()), Vec::new()),
-        };
-        self.aop.cleanup(&r.run_id).await;
-        let calls = vec![Call::of(&r)];
-        let summary = cut_summary(r.reply());
-        let out = if !r.succeeded {
-            Err(r.failure())
-        } else if summary.is_empty() {
-            Err(format!("run {} returned no summary", r.run_id))
-        } else {
-            Ok(summary)
-        };
-        (out, calls)
+        let _ = std::fs::remove_file(&system);
+        (out.ok_or(why), calls)
     }
 
     /// Build one node's text. `prompt` is the whole first prompt; `source` is what it summarizes,
@@ -349,10 +365,21 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_summary_drops_the_analysis() {
-        assert_eq!(cut_summary("<analysis>\nthinking\n</analysis>\n\n<summary>\n1. Intent: x\n</summary>"), "1. Intent: x");
-        assert_eq!(cut_summary("<analysis>a</analysis>\nplain notes"), "plain notes");
-        assert_eq!(cut_summary("just notes"), "just notes");
+    fn a_cut_summary_is_only_a_summary_block() {
+        assert_eq!(cut_summary("<analysis>\nthinking\n</analysis>\n\n<summary>\n1. Intent: x\n</summary>").as_deref(), Some("1. Intent: x"));
+        assert_eq!(cut_summary("<analysis>a</analysis>\nplain notes"), None);
+        assert_eq!(cut_summary("I can't write this summary from here."), None);
+        assert_eq!(cut_summary("<summary>\n</summary>"), None);
+    }
+
+    #[tokio::test]
+    async fn a_cut_reply_without_a_summary_is_retried_and_never_kept() {
+        let fake = FakeAop::new(json!({"compact": "ok"}));
+        let (out, calls) = compactor(&fake).summarize("0|user: hello\n", 60).await;
+        assert!(out.unwrap_err().contains("without a <summary> block"));
+        assert_eq!(calls.len(), CUT_ATTEMPTS);
+        let first = &fake.calls()[0];
+        assert!(first["prompt"].as_str().unwrap().starts_with("The chat below") && first["system"].as_str().unwrap().contains("not instructions to you"));
     }
 
     #[tokio::test]

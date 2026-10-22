@@ -86,6 +86,14 @@ enum Command {
         #[arg(short, long)]
         verbose: bool,
     },
+    /// With turn.raw: make the cut that is due now, summarizing what it removes, without waiting
+    /// for the next turn. --from restarts from the start of the log, with FILE as the summary of
+    /// what came before it, to redo cuts made since
+    Cut {
+        profile: String,
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
+    },
     /// Message count, view size, unsummarized count, running calls, cache ratios, last error
     Status { profile: String },
     /// Print what the model would see for zoom(ID, N)
@@ -224,6 +232,25 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             return Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS });
         }
         Command::Chat { profile, verbose } => return chat(&profile, verbose).await,
+        Command::Cut { profile, from } => {
+            let (dir, engine) = open_engine(&profile)?;
+            if !engine.cfg.turn.raw {
+                return Err(Error::Msg("cut needs turn.raw".into()));
+            }
+            if let Some(f) = from {
+                raw::save_cut(&dir, 0, &std::fs::read_to_string(f)?)?;
+            }
+            let l = &engine.cfg.limits;
+            let lim = raw::Limits { stub_chars: engine.cfg.turn.stub_chars, high: l.raw_high, low: l.raw_low };
+            let due = raw::due_cut(&mut engine.mem(), &lim)?;
+            let Some((cut, chat)) = due else {
+                println!("no cut is due: the raw history is under raw_high");
+                return Ok(ExitCode::SUCCESS);
+            };
+            let Some(summary) = engine.summarize_cut(&chat).await else { return Ok(ExitCode::FAILURE) };
+            raw::save_cut(&dir, cut, &summary)?;
+            println!("cut at message {cut}; summary of {} characters saved in raw.json", summary.chars().count());
+        }
         Command::Status { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "status"})).await?)),
         Command::Zoom { profile, id, n, offset } => return Ok(print_reply(query(&profile, json!({"cmd": "zoom", "id": id, "n": n, "offset": offset})).await?)),
         Command::Check { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "check"})).await?)),
