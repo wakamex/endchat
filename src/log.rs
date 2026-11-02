@@ -230,6 +230,31 @@ impl Log {
         Ok(out)
     }
 
+    /// Replace the text of the messages in `texts`, rewriting their day files, and reindex. The
+    /// only edit the log allows: it is how a message is censored and restored.
+    pub fn rewrite(&mut self, texts: &std::collections::BTreeMap<u64, String>) -> Result<()> {
+        let mut days = std::collections::BTreeSet::new();
+        for &i in texts.keys() {
+            self.get(i)?;
+            days.insert(self.idx.get(i)?.ok_or(Error::IndexMismatch(i))?.day);
+        }
+        for day in days {
+            let mut out = String::new();
+            for (_, line) in self.store.scan(day, 0)? {
+                let changed = Self::parse(&line).and_then(|mut m| {
+                    let text = texts.get(&m.i)?;
+                    m.size = m.kind.as_str().len() + 2 + text.len();
+                    m.text = text.clone();
+                    serde_json::to_string(&m).ok()
+                });
+                out += changed.as_deref().unwrap_or(&line);
+                out.push('\n');
+            }
+            self.store.replace(day, &out)?;
+        }
+        self.rebuild()
+    }
+
     /// Whether message `i` is complete: not a page followed by more pages still to come.
     pub fn is_complete(&mut self, i: u64) -> Result<bool> {
         Ok(!self.get(i)?.more || i + 1 < self.len)

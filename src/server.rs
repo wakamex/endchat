@@ -22,6 +22,7 @@ pub enum Request {
     Status,
     Zoom { id: u64, n: u64, #[serde(default)] offset: usize },
     Check,
+    Censor { ids: Vec<u64>, #[serde(default)] release: bool },
 }
 
 fn event_json(e: &TurnEvent) -> Value {
@@ -54,6 +55,15 @@ pub async fn handle(engine: &Arc<Engine>, req: Request, out: tokio::sync::mpsc::
             let r = engine.mem().zoom(id, n, offset);
             let _ = out.send(match r {
                 Ok(t) => json!({"ok": true, "text": t}),
+                Err(e) => json!({"ok": false, "text": e.to_string()}),
+            });
+        }
+        Request::Censor { ids, release } => {
+            let mut m = engine.mem();
+            let r = if release { crate::censor::release(&mut m, &ids) } else { crate::censor::censor(&mut m, &ids) };
+            let listed = crate::censor::censored(&engine.dir).keys().map(u64::to_string).collect::<Vec<_>>().join(" ");
+            let _ = out.send(match r {
+                Ok(()) => json!({"ok": true, "text": format!("{listed}\n")}),
                 Err(e) => json!({"ok": false, "text": e.to_string()}),
             });
         }

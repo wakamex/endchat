@@ -10,16 +10,12 @@
 //! Each turn is one cache block, and the mark sits on the last block before the previous turn: that
 //! part never changes again, while the previous turn's results are stubbed on the next turn. The
 //! next prompt is one block longer, so its lookback finds this mark.
-//!
-//! Messages listed in `withheld.json` are sent as a one-line stub, in turns and in cut summaries
-//! alike: a message the model's safeguards refuse would otherwise be resent, and refused, on every
-//! turn until a cut removed it.
 
 use crate::error::Result;
 use crate::log::{Kind, Message};
 use crate::memory::{Memory, Prompt};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 
@@ -43,41 +39,12 @@ struct Saved {
 /// history as real conversation turns, and shorter and less often than a neutral description.
 const INTRO: &str = "<chat>\nThis is the conversation you have been taking part in, oldest first, one message per entry as `id|kind: text`. `agent` entries are your own earlier replies, exactly as you sent them; `tool` and `echo` entries are your tool calls and their results; `user` entries are the messages you received; `work` and `note` entries are reports and notes. A large tool result older than the previous turn is replaced by a stub: run the call again if you need it. The message after </chat> is the next one you received. Your final response is your next `agent` entry: follow the same instructions and rules your earlier replies followed, and match their length and style.\n";
 
-const WITHHELD: &str = "withheld.json";
-
-/// The ids of the messages sent as a stub.
-pub fn withheld(dir: &Path) -> BTreeSet<u64> {
-    fs::read_to_string(dir.join(WITHHELD)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
-}
-
-/// Send `ids` as a stub from now on, or again in full when `on` is false.
-pub fn withhold(dir: &Path, ids: &[u64], on: bool) -> Result<()> {
-    let mut set = withheld(dir);
-    for i in ids {
-        if on {
-            set.insert(*i);
-        } else {
-            set.remove(i);
-        }
-    }
-    fs::write(dir.join(WITHHELD), serde_json::to_string(&set)?)?;
-    Ok(())
-}
-
-/// What a withheld message is sent as.
-pub fn withheld_text(i: u64) -> String {
-    format!("[message {i} withheld: the model's safeguards refused a turn on it, so it is kept in the log but not shown]")
-}
-
 /// Characters an old long tool call keeps: enough to name the tool and show what it ran.
 const CALL_HEAD: usize = 200;
 
 /// The message as one transcript entry, with a stub in place of a long old result and only the
 /// start of a long old call.
-fn entry(m: &Message, call: Option<&Message>, stub: bool, withheld: &BTreeSet<u64>, lim: &Limits) -> String {
-    if withheld.contains(&m.i) {
-        return format!("{}|{}: {}\n", m.i, m.kind.as_str(), withheld_text(m.i));
-    }
+fn entry(m: &Message, call: Option<&Message>, stub: bool, lim: &Limits) -> String {
     let chars = m.text.chars().count();
     if stub && m.kind == Kind::Tool && chars > lim.stub_chars.max(CALL_HEAD) {
         let head: String = m.text.chars().take(CALL_HEAD).collect();
@@ -147,8 +114,7 @@ fn history(mem: &mut Memory, from: u64, end: u64, lim: &Limits) -> Result<Histor
     let turns: Vec<usize> = (0..msgs.len()).filter(|&k| msgs[k].kind == Kind::User && msgs[k].run.is_none()).collect();
     let prev = turns.last().copied().unwrap_or(0);
     let calls = calls(&msgs);
-    let withheld = withheld(&mem.dir);
-    let entries = (0..msgs.len()).map(|k| entry(&msgs[k], calls[k].map(|c| &msgs[c]), k < prev, &withheld, lim)).collect();
+    let entries = (0..msgs.len()).map(|k| entry(&msgs[k], calls[k].map(|c| &msgs[c]), k < prev, lim)).collect();
     Ok(History { msgs, entries, turns, prev })
 }
 
@@ -357,21 +323,5 @@ mod tests {
         m.append(Kind::User, &text, None).unwrap();
         let p = prompt(&mut m, &LIM, "t").unwrap().text();
         assert!(p.contains(&format!("0|user: {text}\n</chat>")));
-    }
-
-    #[test]
-    fn a_withheld_message_is_a_stub_in_turns_and_cuts_until_released() {
-        let d = tempfile::tempdir().unwrap();
-        let mut m = mem(d.path());
-        turn(&mut m, "the refused words", "out");
-        turn(&mut m, &long(30_000), "out");
-        turn(&mut m, "last", "out");
-        withhold(d.path(), &[0], true).unwrap();
-        let p = prompt(&mut m, &LIM, "t").unwrap().text();
-        assert!(p.contains(&format!("0|user: {}\n", withheld_text(0))) && !p.contains("the refused words"), "{p}");
-        let (_, input) = due_cut(&mut m, &LIM).unwrap().unwrap();
-        assert!(!input.contains("the refused words"), "{input}");
-        withhold(d.path(), &[0], false).unwrap();
-        assert!(prompt(&mut m, &LIM, "t").unwrap().text().contains("0|user: the refused words\n"));
     }
 }

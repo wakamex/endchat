@@ -114,6 +114,19 @@ impl DayStore {
         Ok(out)
     }
 
+    /// Replace a day file with `content`: written beside it, synced, then renamed over it.
+    pub fn replace(&mut self, day: u32, content: &str) -> Result<()> {
+        let path = self.path(day);
+        let tmp = path.with_extension("jsonl.tmp");
+        let mut f = File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, &path)?;
+        File::open(&self.dir)?.sync_all()?;
+        self.open.remove(&day);
+        Ok(())
+    }
+
     pub fn file_len(&self, day: u32) -> u64 {
         fs::metadata(self.path(day)).map_or(0, |m| m.len())
     }

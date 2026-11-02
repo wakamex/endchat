@@ -15,7 +15,7 @@ fn help_lists_every_subcommand() {
     let o = endchat(&["--help"]);
     assert!(o.status.success());
     let t = text(&o);
-    for cmd in ["serve", "say", "chat", "status", "zoom", "check", "search", "sim", "withhold"] {
+    for cmd in ["serve", "say", "chat", "status", "zoom", "check", "search", "sim", "censor"] {
         assert!(t.contains(cmd), "{cmd} missing from help:\n{t}");
     }
 }
@@ -43,12 +43,17 @@ fn status_zoom_and_check_open_an_idle_profile_directly() {
 }
 
 #[test]
-fn withhold_adds_releases_and_lists_message_ids() {
+fn censor_rewrites_releases_and_lists_message_ids() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().to_str().unwrap();
-    assert_eq!(String::from_utf8_lossy(&endchat(&["withhold", p, "7", "3"]).stdout), "3 7\n");
-    assert_eq!(String::from_utf8_lossy(&endchat(&["withhold", p, "--release", "7"]).stdout), "3\n");
-    assert_eq!(String::from_utf8_lossy(&endchat(&["withhold", p]).stdout), "3\n");
+    std::fs::create_dir_all(dir.path().join("main")).unwrap();
+    let lines: String = (0..4).map(|i| format!("{{\"i\":{i},\"kind\":\"user\",\"text\":\"m{i}\",\"size\":8,\"date\":\"2026-10-19T00:00:00Z\"}}\n")).collect();
+    std::fs::write(dir.path().join("main/2026-10-19.jsonl"), lines).unwrap();
+    let out = |a: &[&str]| { let o = endchat(a); assert!(o.status.success(), "{}", text(&o)); String::from_utf8_lossy(&o.stdout).into_owned() };
+    assert_eq!(out(&["censor", p, "3", "1"]), "1 3\n");
+    assert!(!std::fs::read_to_string(dir.path().join("main/2026-10-19.jsonl")).unwrap().contains("\"m1\""));
+    assert_eq!(out(&["censor", p, "--release", "3"]), "1\n");
+    assert_eq!(out(&["censor", p]), "1\n");
 }
 
 #[test]

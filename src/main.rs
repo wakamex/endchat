@@ -1,6 +1,7 @@
 //! endchat: a chat that never ends, with a summary tree for memory and AOP for every model call.
 
 mod aop;
+mod censor;
 mod compact;
 mod engine;
 mod error;
@@ -94,10 +95,10 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         from: Option<PathBuf>,
     },
-    /// With turn.raw: send the messages IDS as a one-line stub from the next turn on, in turns and
-    /// cut summaries, such as a message the model's safeguards refuse; --release sends them in full
-    /// again. With no IDS, list the withheld messages
-    Withhold {
+    /// Replace the text of the messages IDS in the log with a one-line notice, keeping the
+    /// originals in censored.json, such as a message the model's safeguards refuse; --release puts
+    /// the originals back. With no IDS, list the censored messages
+    Censor {
         profile: String,
         ids: Vec<u64>,
         #[arg(long)]
@@ -260,13 +261,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             raw::save_cut(&dir, cut, &summary)?;
             println!("cut at message {cut}; summary of {} characters saved in raw.json", summary.chars().count());
         }
-        Command::Withhold { profile, ids, release } => {
-            let dir = Profile::locate(&profile)?;
-            if !ids.is_empty() {
-                raw::withhold(&dir, &ids, !release)?;
-            }
-            println!("{}", raw::withheld(&dir).iter().map(u64::to_string).collect::<Vec<_>>().join(" "));
-        }
+        Command::Censor { profile, ids, release } => return Ok(print_reply(query(&profile, json!({"cmd": "censor", "ids": ids, "release": release})).await?)),
         Command::Status { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "status"})).await?)),
         Command::Zoom { profile, id, n, offset } => return Ok(print_reply(query(&profile, json!({"cmd": "zoom", "id": id, "n": n, "offset": offset})).await?)),
         Command::Check { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "check"})).await?)),

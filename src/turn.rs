@@ -346,12 +346,12 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
     let mut result = aop.run(&run_args(engine, file.clone(), parts, index)).await;
     let _ = std::fs::remove_file(&file);
     let refused = |r: &Result<AopResult>| matches!(r, Ok(r) if !r.succeeded && r.refusal.is_some());
-    let mut withheld = false;
+    let mut cleared = false; // the refusal was got round by censoring
     if t.raw && refused(&result) {
         // A refusal recurs on every turn that resends its trigger. The likeliest trigger is the new
         // message, then what entered the history since the last turn that went through, such as
-        // its reply. Each is withheld in turn and the turn tried again; a set that does not help is
-        // released, and if none helps the trigger lies further back.
+        // its reply. Each is censored in turn and the turn tried again; a set that does not help is
+        // restored, and if none helps the trigger lies further back.
         let i = logged[0].i;
         let mut tries = vec![vec![i]];
         let recent = since_last_success(engine, i)?;
@@ -362,18 +362,18 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             let r = result.as_ref().expect("refused");
             runs.push(r.run_id.clone());
             engine.record_calls("turn", &[Call { run_id: r.run_id.clone(), model: r.model.clone(), usage: r.usage, ok: false }]);
-            crate::raw::withhold(&engine.dir, &ids, true)?;
-            let shown = if ids.contains(&i) { crate::raw::withheld_text(i) } else { text.to_owned() };
+            crate::censor::censor(&mut engine.mem(), &ids)?;
+            let shown = if ids.contains(&i) { crate::censor::notice(i) } else { text.to_owned() };
             let retry = crate::raw::prompt_to(&mut engine.mem(), &lim, &tail_of(&shown), i)?;
             let file = write_prompt(engine, &if parts { retry.parts_json() } else { retry.text() })?;
             result = aop.run(&run_args(engine, file.clone(), parts, index)).await;
             let _ = std::fs::remove_file(&file);
-            withheld = !refused(&result);
-            eprintln!("endchat: a turn was refused by the model's safeguards; without messages {ids:?} it was {}", if withheld { "not, so they are withheld from now on" } else { "too" });
-            if withheld {
+            cleared = !refused(&result);
+            eprintln!("endchat: a turn was refused by the model's safeguards; without messages {ids:?} it was {}", if cleared { "not, so they stay censored" } else { "too" });
+            if cleared {
                 break;
             }
-            crate::raw::withhold(&engine.dir, &ids, false)?;
+            crate::censor::release(&mut engine.mem(), &ids)?;
         }
     }
     let mut outcome = Ok(());
@@ -395,8 +395,8 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             }
         };
         if !r.succeeded {
-            outcome = msg(if r.refusal.is_some() && !withheld && t.raw {
-                format!("{}; the turn was refused without its new message and without what came since the last turn that went through, so the trigger is earlier in the history: find it and run `endchat withhold`", r.failure())
+            outcome = msg(if r.refusal.is_some() && !cleared && t.raw {
+                format!("{}; the turn was refused without its new message and without what came since the last turn that went through, so the trigger is earlier in the history: find it and run `endchat censor`", r.failure())
             } else {
                 r.failure()
             });
@@ -461,8 +461,8 @@ fn since_last_success(engine: &Engine, i: u64) -> Result<Vec<u64>> {
             break;
         }
     }
-    let withheld = crate::raw::withheld(&engine.dir);
-    Ok(start.map_or_else(Vec::new, |s| (s + 1..i).filter(|k| !withheld.contains(k)).collect()))
+    let censored = crate::censor::censored(&engine.dir);
+    Ok(start.map_or_else(Vec::new, |s| (s + 1..i).filter(|k| !censored.contains_key(k)).collect()))
 }
 
 /// The session store holding Claude Code's session files: `$CLAUDE_CONFIG_DIR` or `~/.claude`.
@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_message_is_withheld_and_the_turn_answers_without_it() {
+    async fn a_refused_message_is_censored_and_the_turn_answers_without_it() {
         let fake = FakeAop::new(json!({"refuse_if": ["forbidden"], "turn_replies": ["I could not read that one.", "Fine."]}));
         let d = tempfile::tempdir().unwrap();
         let e = raw_engine(&fake, d.path());
@@ -693,19 +693,19 @@ mod tests {
         let (tx, rx) = unbounded_channel();
         say(e.clone(), "forbidden words".into(), None, tx).await.unwrap();
         assert!(collect(rx).await.contains(&TurnEvent::Agent("I could not read that one.".into())));
-        assert_eq!(crate::raw::withheld(d.path()), [1].into());
-        assert_eq!(texts(&e), ["hello", "forbidden words", "I could not read that one."], "the refusal's error text is not a reply");
+        assert_eq!(crate::censor::censored(d.path())[&1].text, "forbidden words");
+        assert_eq!(texts(&e), ["hello", crate::censor::notice(1).as_str(), "I could not read that one."], "the refusal's error text is not a reply");
         let (tx, rx) = unbounded_channel();
         say(e.clone(), "next".into(), None, tx).await.unwrap();
         collect(rx).await;
         let runs: Vec<_> = fake.calls().into_iter().filter(|c| c["cmd"] == "run").collect();
         assert_eq!(runs.len(), 3);
-        assert!(runs[1]["prompt"].as_str().unwrap().ends_with(&crate::raw::withheld_text(1)));
-        assert!(runs[2]["prompt"].as_str().unwrap().contains(&format!("1|user: {}\n", crate::raw::withheld_text(1))));
+        assert!(runs[1]["prompt"].as_str().unwrap().ends_with(&crate::censor::notice(1)));
+        assert!(runs[2]["prompt"].as_str().unwrap().contains(&format!("1|user: {}\n", crate::censor::notice(1))));
     }
 
     #[tokio::test]
-    async fn a_refusal_of_the_last_reply_withholds_the_reply_and_answers_the_new_message() {
+    async fn a_refusal_of_the_last_reply_censors_the_reply_and_answers_the_new_message() {
         let fake = FakeAop::new(json!({"refuse_if": ["forbidden"], "turn_replies": ["a forbidden reply", "Answered."]}));
         let d = tempfile::tempdir().unwrap();
         let e = raw_engine(&fake, d.path());
@@ -714,24 +714,24 @@ mod tests {
             say(e.clone(), text.into(), None, tx).await.unwrap();
             collect(rx).await;
         }
-        assert_eq!(crate::raw::withheld(d.path()), [1].into());
-        assert_eq!(texts(&e), ["hello", "a forbidden reply", "next", "Answered."]);
+        assert_eq!(crate::censor::censored(d.path()).keys().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(texts(&e), ["hello", crate::censor::notice(1).as_str(), "next", "Answered."]);
         let runs: Vec<_> = fake.calls().into_iter().filter(|c| c["cmd"] == "run").collect();
         assert_eq!(runs.len(), 4, "the reply, then the refused turn, without its message, and without the last reply");
         let last = runs[3]["prompt"].as_str().unwrap();
-        assert!(last.ends_with("\nnext") && last.contains(&format!("1|agent: {}\n", crate::raw::withheld_text(1))), "{last}");
+        assert!(last.ends_with("\nnext") && last.contains(&format!("1|agent: {}\n", crate::censor::notice(1))), "{last}");
     }
 
     #[tokio::test]
-    async fn a_refusal_from_the_history_fails_the_turn_and_withholds_nothing() {
+    async fn a_refusal_from_the_history_fails_the_turn_and_censors_nothing() {
         let fake = FakeAop::new(json!({"refuse_if": ["forbidden"]}));
         let d = tempfile::tempdir().unwrap();
         let e = raw_engine(&fake, d.path());
         e.mem().append(Kind::User, "forbidden words", None).unwrap();
         let (tx, rx) = unbounded_channel();
-        assert!(say(e.clone(), "innocent".into(), None, tx).await.unwrap_err().to_string().contains("endchat withhold"));
+        assert!(say(e.clone(), "innocent".into(), None, tx).await.unwrap_err().to_string().contains("endchat censor"));
         collect(rx).await;
-        assert!(crate::raw::withheld(d.path()).is_empty());
+        assert!(crate::censor::censored(d.path()).is_empty());
         assert_eq!(texts(&e), ["forbidden words", "innocent"]);
     }
 
