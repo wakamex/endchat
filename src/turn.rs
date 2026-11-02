@@ -322,8 +322,10 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
         }
     }
     let note = t.tail_note.as_deref().unwrap_or(if t.raw { "" } else { TAIL_NOTE });
-    let tail = format!("<state>\ndate: {}\n{note}{}</state>\n{text}", date.map_or_else(now_iso, str::to_owned), if note.is_empty() { "" } else { "\n" });
-    let (mut prompt, index) = {
+    let date = date.map_or_else(now_iso, str::to_owned);
+    let tail_of = |body: &str| format!("<state>\ndate: {date}\n{note}{}</state>\n{body}", if note.is_empty() { "" } else { "\n" });
+    let tail = tail_of(text);
+    let (prompt, index) = {
         let mut m = engine.mem();
         let prompt = if t.raw {
             crate::raw::prompt(&mut m, &lim, &tail)?
@@ -347,23 +349,32 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
     let mut withheld = false;
     if t.raw && refused(&result) {
         // A refusal recurs on every turn that resends its trigger. The likeliest trigger is the new
-        // message, so it is withheld and the turn tried once more; if that is refused too, the
-        // trigger lies in the history and the message is released again.
-        let r = result.as_ref().expect("checked above");
-        runs.push(r.run_id.clone());
-        engine.record_calls("turn", &[Call { run_id: r.run_id.clone(), model: r.model.clone(), usage: r.usage, ok: false }]);
+        // message, then what entered the history since the last turn that went through, such as
+        // its reply. Each is withheld in turn and the turn tried again; a set that does not help is
+        // released, and if none helps the trigger lies further back.
         let i = logged[0].i;
-        crate::raw::withhold(&engine.dir, &[i], true)?;
-        let last = prompt.0.last_mut().expect("a prompt has a tail");
-        last.0 = format!("{}{}", last.0.strip_suffix(text).unwrap_or(&last.0), crate::raw::withheld_text(i));
-        let file = write_prompt(engine, &if parts { prompt.parts_json() } else { prompt.text() })?;
-        result = aop.run(&run_args(engine, file.clone(), parts, index)).await;
-        let _ = std::fs::remove_file(&file);
-        withheld = !refused(&result);
-        if !withheld {
-            crate::raw::withhold(&engine.dir, &[i], false)?;
+        let mut tries = vec![vec![i]];
+        let recent = since_last_success(engine, i)?;
+        if !recent.is_empty() {
+            tries.push(recent);
         }
-        eprintln!("endchat: message {i} was refused by the model's safeguards; {}", if withheld { "it is withheld from now on" } else { "so was the turn without it" });
+        for ids in tries {
+            let r = result.as_ref().expect("refused");
+            runs.push(r.run_id.clone());
+            engine.record_calls("turn", &[Call { run_id: r.run_id.clone(), model: r.model.clone(), usage: r.usage, ok: false }]);
+            crate::raw::withhold(&engine.dir, &ids, true)?;
+            let shown = if ids.contains(&i) { crate::raw::withheld_text(i) } else { text.to_owned() };
+            let retry = crate::raw::prompt_to(&mut engine.mem(), &lim, &tail_of(&shown), i)?;
+            let file = write_prompt(engine, &if parts { retry.parts_json() } else { retry.text() })?;
+            result = aop.run(&run_args(engine, file.clone(), parts, index)).await;
+            let _ = std::fs::remove_file(&file);
+            withheld = !refused(&result);
+            eprintln!("endchat: a turn was refused by the model's safeguards; without messages {ids:?} it was {}", if withheld { "not, so they are withheld from now on" } else { "too" });
+            if withheld {
+                break;
+            }
+            crate::raw::withhold(&engine.dir, &ids, false)?;
+        }
     }
     let mut outcome = Ok(());
     for round in 0..=engine.cfg.turn.max_rounds {
@@ -385,7 +396,7 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
         };
         if !r.succeeded {
             outcome = msg(if r.refusal.is_some() && !withheld && t.raw {
-                format!("{}; the turn was refused without its new message too, so the trigger is earlier in the history: find it and run `endchat withhold`", r.failure())
+                format!("{}; the turn was refused without its new message and without what came since the last turn that went through, so the trigger is earlier in the history: find it and run `endchat withhold`", r.failure())
             } else {
                 r.failure()
             });
@@ -433,6 +444,25 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
         }
     }
     outcome
+}
+
+/// The messages before `i` that no successful turn has seen: those after the user message that
+/// started the last turn to succeed, such as its reply. Empty when no turn has succeeded.
+fn since_last_success(engine: &Engine, i: u64) -> Result<Vec<u64>> {
+    let turns = std::fs::read_to_string(engine.dir.join("turns.jsonl")).unwrap_or_default();
+    let end = turns.lines().rev().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).find(|v| v["ok"] == true).and_then(|v| v["end"].as_u64());
+    let Some(end) = end else { return Ok(Vec::new()) };
+    let mut m = engine.mem();
+    let mut start = None;
+    for k in (0..end.min(i)).rev() {
+        let msg = m.log.get(k)?;
+        if msg.kind == Kind::User && msg.run.is_none() {
+            start = Some(k);
+            break;
+        }
+    }
+    let withheld = crate::raw::withheld(&engine.dir);
+    Ok(start.map_or_else(Vec::new, |s| (s + 1..i).filter(|k| !withheld.contains(k)).collect()))
 }
 
 /// The session store holding Claude Code's session files: `$CLAUDE_CONFIG_DIR` or `~/.claude`.
@@ -672,6 +702,24 @@ mod tests {
         assert_eq!(runs.len(), 3);
         assert!(runs[1]["prompt"].as_str().unwrap().ends_with(&crate::raw::withheld_text(1)));
         assert!(runs[2]["prompt"].as_str().unwrap().contains(&format!("1|user: {}\n", crate::raw::withheld_text(1))));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_of_the_last_reply_withholds_the_reply_and_answers_the_new_message() {
+        let fake = FakeAop::new(json!({"refuse_if": ["forbidden"], "turn_replies": ["a forbidden reply", "Answered."]}));
+        let d = tempfile::tempdir().unwrap();
+        let e = raw_engine(&fake, d.path());
+        for text in ["hello", "next"] {
+            let (tx, rx) = unbounded_channel();
+            say(e.clone(), text.into(), None, tx).await.unwrap();
+            collect(rx).await;
+        }
+        assert_eq!(crate::raw::withheld(d.path()), [1].into());
+        assert_eq!(texts(&e), ["hello", "a forbidden reply", "next", "Answered."]);
+        let runs: Vec<_> = fake.calls().into_iter().filter(|c| c["cmd"] == "run").collect();
+        assert_eq!(runs.len(), 4, "the reply, then the refused turn, without its message, and without the last reply");
+        let last = runs[3]["prompt"].as_str().unwrap();
+        assert!(last.ends_with("\nnext") && last.contains(&format!("1|agent: {}\n", crate::raw::withheld_text(1))), "{last}");
     }
 
     #[tokio::test]

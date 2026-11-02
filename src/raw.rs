@@ -113,11 +113,11 @@ fn calls(msgs: &[Message]) -> Vec<Option<usize>> {
         .collect()
 }
 
-/// Messages from `from` on, with each page run joined into its first message.
-fn messages(mem: &mut Memory, from: u64) -> Result<Vec<Message>> {
+/// Messages from `from` up to `end`, with each page run joined into its first message.
+fn messages(mem: &mut Memory, from: u64, end: u64) -> Result<Vec<Message>> {
     let mut out: Vec<Message> = Vec::new();
     let mut joining = false;
-    for i in from..mem.log.len() {
+    for i in from..end {
         let m = mem.log.get(i)?;
         match out.last_mut() {
             Some(prev) if joining => prev.text.push_str(&m.text),
@@ -141,8 +141,8 @@ struct History {
     prev: usize,
 }
 
-fn history(mem: &mut Memory, from: u64, lim: &Limits) -> Result<History> {
-    let msgs = messages(mem, from)?;
+fn history(mem: &mut Memory, from: u64, end: u64, lim: &Limits) -> Result<History> {
+    let msgs = messages(mem, from, end)?;
     // A turn starts at each message the user sent; one delivered during a run carries that run.
     let turns: Vec<usize> = (0..msgs.len()).filter(|&k| msgs[k].kind == Kind::User && msgs[k].run.is_none()).collect();
     let prev = turns.last().copied().unwrap_or(0);
@@ -157,7 +157,8 @@ fn history(mem: &mut Memory, from: u64, lim: &Limits) -> Result<History> {
 /// leaves at most `low` bytes, or failing that at the previous turn, which is never cut into.
 pub fn due_cut(mem: &mut Memory, lim: &Limits) -> Result<Option<(u64, String)>> {
     let s = saved(&mem.dir);
-    let h = history(mem, s.cut, lim)?;
+    let end = mem.log.len();
+    let h = history(mem, s.cut, end, lim)?;
     let bytes: usize = h.entries.iter().map(String::len).sum();
     if bytes <= lim.high {
         return Ok(None);
@@ -189,8 +190,14 @@ pub fn save_cut(dir: &Path, cut: u64, summary: &str) -> Result<()> {
 }
 
 pub fn prompt(mem: &mut Memory, lim: &Limits, tail: &str) -> Result<Prompt> {
+    let end = mem.log.len();
+    prompt_to(mem, lim, tail, end)
+}
+
+/// The prompt with the history up to message `end`, as it was before that message was logged.
+pub fn prompt_to(mem: &mut Memory, lim: &Limits, tail: &str, end: u64) -> Result<Prompt> {
     let s = saved(&mem.dir);
-    let h = history(mem, s.cut, lim)?;
+    let h = history(mem, s.cut, end, lim)?;
     let mut head = INTRO.to_owned();
     if !s.summary.is_empty() {
         let before = if s.cut == 0 { "before this log began".to_owned() } else { format!("before message {}", s.cut) };
