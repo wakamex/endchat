@@ -148,6 +148,8 @@ def main():
             finish(run_id, "", prompt, scenario, ok=False)
         if scenario.get("compact") == "fail":
             finish(run_id, "", prompt, scenario, ok=False)
+        if any(w in prompt for w in scenario.get("refuse_if", [])):
+            finish(run_id, "API Error: safeguards flagged this message", prompt, scenario, ok=False, refusal={"category": "test", "models": ["claude-fake-1"]})
         if scenario.get("compact") == "refuse":
             finish(run_id, "API Error: refused", prompt, scenario, ok=False, refusal={"category": "test", "models": ["claude-fake-1"]})
         finish(run_id, reply_for(prompt, 1, run_id, scenario), prompt, scenario)

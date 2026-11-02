@@ -15,7 +15,7 @@ fn help_lists_every_subcommand() {
     let o = endchat(&["--help"]);
     assert!(o.status.success());
     let t = text(&o);
-    for cmd in ["serve", "say", "chat", "status", "zoom", "check", "search", "sim"] {
+    for cmd in ["serve", "say", "chat", "status", "zoom", "check", "search", "sim", "withhold"] {
         assert!(t.contains(cmd), "{cmd} missing from help:\n{t}");
     }
 }
@@ -40,6 +40,15 @@ fn status_zoom_and_check_open_an_idle_profile_directly() {
     let o = endchat(&["zoom", p, "0", "1"]);
     assert!(!o.status.success());
     assert!(text(&o).contains("the chat has 0 messages"), "{}", text(&o));
+}
+
+#[test]
+fn withhold_adds_releases_and_lists_message_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().to_str().unwrap();
+    assert_eq!(String::from_utf8_lossy(&endchat(&["withhold", p, "7", "3"]).stdout), "3 7\n");
+    assert_eq!(String::from_utf8_lossy(&endchat(&["withhold", p, "--release", "7"]).stdout), "3\n");
+    assert_eq!(String::from_utf8_lossy(&endchat(&["withhold", p]).stdout), "3\n");
 }
 
 #[test]

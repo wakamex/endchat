@@ -94,6 +94,15 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         from: Option<PathBuf>,
     },
+    /// With turn.raw: send the messages IDS as a one-line stub from the next turn on, in turns and
+    /// cut summaries, such as a message the model's safeguards refuse; --release sends them in full
+    /// again. With no IDS, list the withheld messages
+    Withhold {
+        profile: String,
+        ids: Vec<u64>,
+        #[arg(long)]
+        release: bool,
+    },
     /// Message count, view size, unsummarized count, running calls, cache ratios, last error
     Status { profile: String },
     /// Print what the model would see for zoom(ID, N)
@@ -250,6 +259,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let Some(summary) = engine.summarize_cut(&chat).await else { return Ok(ExitCode::FAILURE) };
             raw::save_cut(&dir, cut, &summary)?;
             println!("cut at message {cut}; summary of {} characters saved in raw.json", summary.chars().count());
+        }
+        Command::Withhold { profile, ids, release } => {
+            let dir = Profile::locate(&profile)?;
+            if !ids.is_empty() {
+                raw::withhold(&dir, &ids, !release)?;
+            }
+            println!("{}", raw::withheld(&dir).iter().map(u64::to_string).collect::<Vec<_>>().join(" "));
         }
         Command::Status { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "status"})).await?)),
         Command::Zoom { profile, id, n, offset } => return Ok(print_reply(query(&profile, json!({"cmd": "zoom", "id": id, "n": n, "offset": offset})).await?)),
