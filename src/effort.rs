@@ -67,7 +67,8 @@ pub fn describe(dir: &Path, configured: &str) -> String {
 /// The state-block line that tells the model its effort and how to change it.
 pub fn state_line(dir: &Path, now: &str) -> String {
     format!(
-        "effort: {now}. Set it with `endchat effort {} LEVEL` ({}), which holds until changed, or add --next for the next turn only.",
+        "effort: {now}. Set it with `{} effort {} LEVEL` ({}), which holds until changed, or add --next for the next turn only.",
+        std::env::current_exe().map_or_else(|_| "endchat".into(), |p| p.display().to_string()),
         dir.display(),
         CLAUDE_LEVELS.join(", ")
     )

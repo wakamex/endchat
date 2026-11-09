@@ -763,7 +763,7 @@ mod tests {
         };
         assert_eq!((effort(0), effort(1)), ("max".to_owned(), "high".to_owned()));
         let prompt = runs[1]["prompt"].as_str().unwrap();
-        assert!(prompt.contains(&format!("effort: high. Set it with `endchat effort {} LEVEL`", d.path().display())), "{prompt}");
+        assert!(prompt.contains(&format!("effort: high. Set it with `{} effort {} LEVEL`", std::env::current_exe().unwrap().display(), d.path().display())), "{prompt}");
     }
 
     #[test]
