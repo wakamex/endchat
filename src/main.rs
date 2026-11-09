@@ -3,6 +3,7 @@
 mod aop;
 mod censor;
 mod compact;
+mod effort;
 mod engine;
 mod error;
 mod events;
@@ -103,6 +104,16 @@ enum Command {
         ids: Vec<u64>,
         #[arg(long)]
         release: bool,
+    },
+    /// Show the effort turns run at, or set LEVEL as the default from now on, or with --next for
+    /// the next turn only; --reset goes back to the config's turn.effort
+    Effort {
+        profile: String,
+        level: Option<String>,
+        #[arg(long)]
+        next: bool,
+        #[arg(long)]
+        reset: bool,
     },
     /// Message count, view size, unsummarized count, running calls, cache ratios, last error
     Status { profile: String },
@@ -262,6 +273,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             println!("cut at message {cut}; summary of {} characters saved in raw.json", summary.chars().count());
         }
         Command::Censor { profile, ids, release } => return Ok(print_reply(query(&profile, json!({"cmd": "censor", "ids": ids, "release": release})).await?)),
+        Command::Effort { profile, level, next, reset } => {
+            let dir = Profile::locate(&profile)?;
+            let cfg = crate::profile::Config::load(&dir)?;
+            if reset {
+                effort::save(&dir, &effort::Effort::default())?;
+            }
+            if let Some(level) = level {
+                effort::set(&dir, &cfg.turn.agent, &level, next)?;
+            }
+            print!("{}", effort::describe(&dir, &cfg.turn.effort));
+        }
         Command::Status { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "status"})).await?)),
         Command::Zoom { profile, id, n, offset } => return Ok(print_reply(query(&profile, json!({"cmd": "zoom", "id": id, "n": n, "offset": offset})).await?)),
         Command::Check { profile } => return Ok(print_reply(query(&profile, json!({"cmd": "check"})).await?)),

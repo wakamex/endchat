@@ -15,7 +15,7 @@ fn help_lists_every_subcommand() {
     let o = endchat(&["--help"]);
     assert!(o.status.success());
     let t = text(&o);
-    for cmd in ["serve", "say", "chat", "status", "zoom", "check", "search", "sim", "censor"] {
+    for cmd in ["serve", "say", "chat", "status", "zoom", "check", "search", "sim", "censor", "effort"] {
         assert!(t.contains(cmd), "{cmd} missing from help:\n{t}");
     }
 }
@@ -54,6 +54,17 @@ fn censor_rewrites_releases_and_lists_message_ids() {
     assert!(!std::fs::read_to_string(dir.path().join("main/2026-10-19.jsonl")).unwrap().contains("\"m1\""));
     assert_eq!(out(&["censor", p, "--release", "3"]), "1\n");
     assert_eq!(out(&["censor", p]), "1\n");
+}
+
+#[test]
+fn effort_sets_a_default_and_a_next_turn_level_and_rejects_unknown_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().to_str().unwrap();
+    assert_eq!(text(&endchat(&["effort", p])), "effort: medium (config)\n");
+    assert_eq!(text(&endchat(&["effort", p, "xhigh"])), "effort: xhigh (set; config medium)\n");
+    assert_eq!(text(&endchat(&["effort", p, "max", "--next"])), "effort: xhigh (set; config medium); next turn: max\n");
+    assert!(!endchat(&["effort", p, "huge"]).status.success());
+    assert_eq!(text(&endchat(&["effort", p, "--reset"])), "effort: medium (config)\n");
 }
 
 #[test]

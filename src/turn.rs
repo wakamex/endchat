@@ -209,12 +209,12 @@ fn write_prompt(engine: &Engine, text: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn run_args(engine: &Engine, prompt_file: PathBuf, parts: bool, label: u64) -> RunArgs {
+fn run_args(engine: &Engine, prompt_file: PathBuf, parts: bool, label: u64, effort: &str) -> RunArgs {
     let t = &engine.cfg.turn;
     RunArgs {
         agent: t.agent.clone(),
         model: t.model.clone(),
-        effort: t.effort.clone(),
+        effort: effort.to_owned(),
         profile: t.profile.clone(),
         no_web: t.no_web,
         tools: (!t.native).then(|| t.tools.clone()),
@@ -321,7 +321,11 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             }
         }
     }
-    let note = t.tail_note.as_deref().unwrap_or(if t.raw { "" } else { TAIL_NOTE });
+    let effort = crate::effort::take(&engine.dir, &t.effort)?;
+    let mut note = t.tail_note.clone().unwrap_or_else(|| if t.raw { String::new() } else { TAIL_NOTE.to_owned() });
+    if t.effort_control {
+        note = format!("{}{}", if note.is_empty() { String::new() } else { note + "\n" }, crate::effort::state_line(&engine.dir, &effort));
+    }
     let date = date.map_or_else(now_iso, str::to_owned);
     let tail_of = |body: &str| format!("<state>\ndate: {date}\n{note}{}</state>\n{body}", if note.is_empty() { "" } else { "\n" });
     let tail = tail_of(text);
@@ -343,7 +347,7 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
     let mut runs: Vec<String> = Vec::new();
     let parts = engine.cfg.turn.prompt_parts && prompt.has_mark();
     let file = write_prompt(engine, &if parts { prompt.parts_json() } else { prompt.text() })?;
-    let mut result = aop.run(&run_args(engine, file.clone(), parts, index)).await;
+    let mut result = aop.run(&run_args(engine, file.clone(), parts, index, &effort)).await;
     let _ = std::fs::remove_file(&file);
     let refused = |r: &Result<AopResult>| matches!(r, Ok(r) if !r.succeeded && r.refusal.is_some());
     let mut cleared = false; // the refusal was got round by censoring
@@ -366,7 +370,7 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             let shown = if ids.contains(&i) { crate::censor::notice(i) } else { text.to_owned() };
             let retry = crate::raw::prompt_to(&mut engine.mem(), &lim, &tail_of(&shown), i)?;
             let file = write_prompt(engine, &if parts { retry.parts_json() } else { retry.text() })?;
-            result = aop.run(&run_args(engine, file.clone(), parts, index)).await;
+            result = aop.run(&run_args(engine, file.clone(), parts, index, &effort)).await;
             let _ = std::fs::remove_file(&file);
             cleared = !refused(&result);
             eprintln!("endchat: a turn was refused by the model's safeguards; without messages {ids:?} it was {}", if cleared { "not, so they stay censored" } else { "too" });
@@ -733,6 +737,33 @@ mod tests {
         collect(rx).await;
         assert!(crate::censor::censored(d.path()).is_empty());
         assert_eq!(texts(&e), ["forbidden words", "innocent"]);
+    }
+
+    #[tokio::test]
+    async fn the_model_sees_its_effort_and_a_next_turn_effort_applies_once() {
+        let fake = FakeAop::new(json!({}));
+        let d = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.aop_bin = fake.aop().bin;
+        (cfg.turn.raw, cfg.turn.native, cfg.turn.profile, cfg.turn.allow_host, cfg.turn.effort_control) = (true, true, "host".into(), true, true);
+        cfg.turn.workdir = Some(d.path().join("work"));
+        std::fs::create_dir_all(d.path().join("work")).unwrap();
+        let e = Engine::open(d.path(), cfg).unwrap();
+        crate::effort::set(d.path(), "claude", "high", false).unwrap();
+        crate::effort::set(d.path(), "claude", "max", true).unwrap();
+        for text in ["first", "second"] {
+            let (tx, rx) = unbounded_channel();
+            say(e.clone(), text.into(), None, tx).await.unwrap();
+            collect(rx).await;
+        }
+        let runs: Vec<_> = fake.calls().into_iter().filter(|c| c["cmd"] == "run").collect();
+        let effort = |k: usize| {
+            let args: Vec<&str> = runs[k]["args"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
+            args[args.iter().position(|a| *a == "--effort").unwrap() + 1].to_owned()
+        };
+        assert_eq!((effort(0), effort(1)), ("max".to_owned(), "high".to_owned()));
+        let prompt = runs[1]["prompt"].as_str().unwrap();
+        assert!(prompt.contains(&format!("effort: high. Set it with `endchat effort {} LEVEL`", d.path().display())), "{prompt}");
     }
 
     #[test]

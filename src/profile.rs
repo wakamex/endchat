@@ -87,6 +87,9 @@ pub struct Turn {
     /// Claude Code session files keep it, with a one-line stub. Kept whole, each file would hold the
     /// whole prompt, growing the session store and repeating the chat in searches.
     pub stub_sessions: bool,
+    /// With `native`: tell the model each turn the effort it runs at and how to change it with
+    /// `endchat effort`, a default or the next turn's.
+    pub effort_control: bool,
 }
 
 impl Default for Turn {
@@ -112,6 +115,7 @@ impl Default for Turn {
             native: false,
             watch_units: false,
             stub_sessions: false,
+            effort_control: false,
         }
     }
 }
@@ -163,6 +167,9 @@ impl Config {
         }
         if cfg.turn.native && (cfg.turn.profile != "host" || cfg.turn.workdir.is_none()) {
             return msg("turn.native = true needs turn.profile = \"host\" and a turn.workdir");
+        }
+        if cfg.turn.effort_control && !cfg.turn.native {
+            return msg("turn.effort_control = true needs turn.native = true, whose tools can run endchat");
         }
         if !cfg.compactor.tree && !cfg.turn.raw {
             return msg("compactor.tree = false needs turn.raw = true");
