@@ -134,3 +134,45 @@ fn chat_without_a_server_answers_each_line_and_keeps_its_history() {
     assert!(text(&o).contains("no server running, so this process owns the profile"));
     assert!(text(&endchat(&["status", profile.to_str().unwrap()])).starts_with("state: idle\nmessages: 4\n"), "two exchanges are logged");
 }
+
+#[test]
+fn chat_through_a_server_shows_turns_started_elsewhere_and_follows_a_restarted_server() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("scenario.json"), r#"{"turn_replies": ["Before the restart.", "After the restart."]}"#).unwrap();
+    let aop = dir.path().join("aop");
+    std::fs::write(&aop, format!("#!/bin/sh\nexport FAKE_AOP_DIR='{}'\nexec python3 '{}/tests/fake_aop.py' \"$@\"\n", state.display(), env!("CARGO_MANIFEST_DIR"))).unwrap();
+    std::fs::set_permissions(&aop, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let profile = dir.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join("config.toml"), format!("aop_bin = \"{}\"\n", aop.display())).unwrap();
+    let p = profile.to_str().unwrap();
+    let serve = || {
+        let child = Command::new(env!("CARGO_BIN_EXE_endchat")).args(["serve", p]).stderr(std::process::Stdio::null()).spawn().unwrap();
+        while !profile.join("control.sock").exists() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        child
+    };
+    let mut server = serve();
+    let mut chat = Command::new(env!("CARGO_BIN_EXE_endchat")).args(["chat", p]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(endchat(&["say", p, "from another client"]).status.success());
+    server.kill().unwrap();
+    server.wait().unwrap();
+    let _ = std::fs::remove_file(profile.join("control.sock"));
+    let mut server = serve();
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    assert!(endchat(&["say", p, "again"]).status.success());
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    chat.stdin.take().unwrap().write_all(b"").unwrap();
+    let o = chat.wait_with_output().unwrap();
+    server.kill().unwrap();
+    let out = text(&o);
+    assert!(out.contains("» from another client") && out.contains("Before the restart."), "{out}");
+    assert!(out.contains("· lost the server") && out.contains("» again") && out.contains("After the restart."), "{out}");
+    assert_eq!(out.matches("Before the restart.").count(), 1, "nothing is shown twice after reconnecting: {out}");
+}

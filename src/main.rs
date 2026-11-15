@@ -419,6 +419,8 @@ struct Follow {
     page: String,
     /// When the running turn started, while one runs.
     busy: Option<String>,
+    /// The id after the last message shown, where a new follow request resumes.
+    next: Option<u64>,
 }
 
 impl Follow {
@@ -436,6 +438,9 @@ impl Follow {
         }
         if v["event"] != "message" {
             return None;
+        }
+        if let Some(i) = v["i"].as_u64() {
+            self.next = Some(i + 1);
         }
         if v["more"].as_bool().unwrap_or(false) {
             self.page.push_str(t);
@@ -532,17 +537,30 @@ async fn chat(profile: &str, verbose: bool) -> Result<ExitCode> {
     let sent = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
     let follower = local.is_none().then(|| {
         let (dir, printer) = (dir.clone(), printer.clone());
-        let mut f = Follow { verbose, sent: sent.clone(), page: String::new(), busy: None };
+        let mut f = Follow { verbose, sent: sent.clone(), page: String::new(), busy: None, next: None };
         tokio::spawn(async move {
-            let req = json!({"cmd": "follow", "back": 6});
-            let followed = server::ask(&dir, &req, |v| {
-                if let Some(l) = f.line(&v) {
-                    chat_print(&printer, l);
+            // A restarted server is followed again from the message after the last one shown.
+            let mut lost = false;
+            loop {
+                let req = match f.next {
+                    Some(n) => json!({"cmd": "follow", "from": n}),
+                    None => json!({"cmd": "follow", "back": 6}),
+                };
+                let connected = server::ask(&dir, &req, |v| {
+                    if std::mem::take(&mut lost) {
+                        chat_print(&printer, "· following again".into());
+                    }
+                    if let Some(l) = f.line(&v) {
+                        chat_print(&printer, l);
+                    }
+                })
+                .await;
+                if !lost && !matches!(connected, Ok(false)) {
+                    lost = true;
+                    f.busy = None;
+                    chat_print(&printer, "· lost the server; following again when it is back".into());
                 }
-            })
-            .await;
-            if !matches!(followed, Ok(true)) {
-                chat_print(&printer, "error: lost the server; start it with endchat serve, or chat again".into());
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         })
     });
@@ -623,7 +641,7 @@ mod tests {
 
     #[test]
     fn the_chat_shows_messages_from_elsewhere_hides_its_own_lines_and_marks_turns() {
-        let mut f = Follow { verbose: false, sent: Default::default(), page: String::new(), busy: None };
+        let mut f = Follow { verbose: false, sent: Default::default(), page: String::new(), busy: None, next: None };
         f.sent.lock().unwrap().push_back("typed here".into());
         let msg = |kind: &str, text: &str| json!({"event": "message", "kind": kind, "text": text, "more": false});
         assert_eq!(f.line(&msg("user", "typed here")), None);
