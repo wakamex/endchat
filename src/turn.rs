@@ -838,7 +838,9 @@ mod tests {
         assert!(say(e.clone(), "innocent".into(), None, tx).await.unwrap_err().to_string().contains("endchat censor"));
         collect(rx).await;
         assert!(crate::censor::censored(d.path()).is_empty());
-        assert_eq!(texts(&e), ["forbidden words", "innocent"]);
+        let t = texts(&e);
+        assert_eq!(t[..2], ["forbidden words", "innocent"]);
+        assert!(t[2].starts_with("[endchat] the turn for the message above failed") && t.len() == 3, "{t:?}");
     }
 
     #[tokio::test]
