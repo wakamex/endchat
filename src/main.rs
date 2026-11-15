@@ -411,6 +411,57 @@ fn chat_line(v: &Value, verbose: bool) -> Option<String> {
     }
 }
 
+/// How a followed event shows in the chat: everything the profile logs, from any sender, and the
+/// turn starting and ending. `sent` holds lines typed here, which the terminal already shows.
+struct Follow {
+    verbose: bool,
+    sent: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    page: String,
+    /// When the running turn started, while one runs.
+    busy: Option<String>,
+}
+
+impl Follow {
+    fn line(&mut self, v: &Value) -> Option<String> {
+        let t = v["text"].as_str().unwrap_or("");
+        if v["event"] == "state" {
+            let s = &v["state"];
+            let was = self.busy.take();
+            if s["busy"].as_bool().unwrap_or(false) {
+                self.busy = Some(s["since"].as_str().unwrap_or_default().to_owned());
+                return was.is_none().then(|| format!("· working{}", s["effort"].as_str().map_or(String::new(), |e| format!(" at effort {e}"))));
+            }
+            let took = was.as_deref().and_then(util::unix_from_iso).zip(util::unix_from_iso(&util::now_iso())).map(|(a, b)| (b - a) / 60);
+            return was.map(|_| format!("· idle{}", took.map_or(String::new(), |m| format!(" after {m} min"))));
+        }
+        if v["event"] != "message" {
+            return None;
+        }
+        if v["more"].as_bool().unwrap_or(false) {
+            self.page.push_str(t);
+            return None;
+        }
+        let text = std::mem::take(&mut self.page) + t;
+        match v["kind"].as_str() {
+            Some("agent") => Some(format!("{text}\n")),
+            Some("user") => {
+                let mut sent = self.sent.lock().expect("sent lock poisoned");
+                match sent.iter().position(|s| *s == text) {
+                    Some(k) => {
+                        sent.remove(k);
+                        None
+                    }
+                    None => Some(format!("» {}", text.replace('\n', "\n  "))),
+                }
+            }
+            Some("tool") if self.verbose => Some(format!("> {}", text.chars().take(300).collect::<String>())),
+            Some("echo") if self.verbose => Some(format!("< {}", text.lines().take(12).collect::<Vec<_>>().join("\n< "))),
+            Some(k @ ("note" | "work")) => Some(format!("[{k}] {text}")),
+            _ => None,
+        }
+    }
+}
+
 type Printer = std::sync::Arc<std::sync::Mutex<Option<Box<dyn rustyline::ExternalPrinter + Send>>>>;
 
 /// Show a line above the prompt while one is being typed, or print it when there is no terminal.
@@ -438,7 +489,11 @@ async fn chat(profile: &str, verbose: bool) -> Result<ExitCode> {
             Some((engine, pump))
         }
     };
-    eprintln!("endchat chat: {} ({}). Each line is a message; Ctrl-D ends.", dir.display(), if local.is_some() { "no server running, so this process owns the profile" } else { "through its server" });
+    eprintln!(
+        "endchat chat: {} ({}). Each line is a message; end a line with \\ to go on to the next; Ctrl-D ends.",
+        dir.display(),
+        if local.is_some() { "no server running, so this process owns the profile" } else { "through its server, showing everything it logs" }
+    );
     let history = dir.join("chat-history.txt");
     let mut editor = rustyline::DefaultEditor::new().map_err(|e| Error::Msg(e.to_string()))?;
     let _ = editor.load_history(&history);
@@ -448,20 +503,48 @@ async fn chat(profile: &str, verbose: bool) -> Result<ExitCode> {
     }));
     let (send, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
     let input = std::thread::spawn(move || {
+        let mut message = String::new();
         loop {
-            match editor.readline("› ") {
-                Ok(line) if line.trim().is_empty() => {}
+            match editor.readline(if message.is_empty() { "› " } else { "… " }) {
                 Ok(line) => {
-                    let _ = editor.add_history_entry(line.trim());
-                    if send.send(line.trim().to_owned()).is_err() {
+                    // A line ending in a backslash goes on to the next; a paste arrives whole.
+                    if let Some(head) = line.strip_suffix('\\') {
+                        message += head;
+                        message.push('\n');
+                        continue;
+                    }
+                    message += &line;
+                    let text = std::mem::take(&mut message).trim().to_owned();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let _ = editor.add_history_entry(&text);
+                    if send.send(text).is_err() {
                         break;
                     }
                 }
-                Err(rustyline::error::ReadlineError::Interrupted) => {}
+                Err(rustyline::error::ReadlineError::Interrupted) => message.clear(),
                 Err(_) => break,
             }
         }
         let _ = editor.save_history(&history);
+    });
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let follower = local.is_none().then(|| {
+        let (dir, printer) = (dir.clone(), printer.clone());
+        let mut f = Follow { verbose, sent: sent.clone(), page: String::new(), busy: None };
+        tokio::spawn(async move {
+            let req = json!({"cmd": "follow", "back": 6});
+            let followed = server::ask(&dir, &req, |v| {
+                if let Some(l) = f.line(&v) {
+                    chat_print(&printer, l);
+                }
+            })
+            .await;
+            if !matches!(followed, Ok(true)) {
+                chat_print(&printer, "error: lost the server; start it with endchat serve, or chat again".into());
+            }
+        })
     });
     let mut turns = tokio::task::JoinSet::new();
     while let Some(text) = lines.recv().await {
@@ -470,10 +553,14 @@ async fn chat(profile: &str, verbose: bool) -> Result<ExitCode> {
         match &local {
             None => {
                 let dir = dir.clone();
+                sent.lock().expect("sent lock poisoned").push_back(text.clone());
+                // The follower shows the turn; only what it cannot show is printed here.
                 turns.spawn(async move {
                     let shown = server::ask(&dir, &req, |v| {
-                        if let Some(l) = chat_line(&v, verbose) {
-                            chat_print(&printer, l);
+                        if matches!(v["event"].as_str(), Some("queued" | "error")) {
+                            if let Some(l) = chat_line(&v, verbose) {
+                                chat_print(&printer, l);
+                            }
                         }
                     });
                     if !matches!(shown.await, Ok(true)) {
@@ -499,6 +586,9 @@ async fn chat(profile: &str, verbose: bool) -> Result<ExitCode> {
     }
     while turns.join_next().await.is_some() {}
     let _ = input.join();
+    if let Some(f) = follower {
+        f.abort();
+    }
     if let Some((engine, pump)) = local {
         engine.stop();
         let _ = pump.await;
@@ -524,5 +614,27 @@ async fn main() -> ExitCode {
             eprintln!("endchat: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_chat_shows_messages_from_elsewhere_hides_its_own_lines_and_marks_turns() {
+        let mut f = Follow { verbose: false, sent: Default::default(), page: String::new(), busy: None };
+        f.sent.lock().unwrap().push_back("typed here".into());
+        let msg = |kind: &str, text: &str| json!({"event": "message", "kind": kind, "text": text, "more": false});
+        assert_eq!(f.line(&msg("user", "typed here")), None);
+        assert_eq!(f.line(&msg("user", "[agent-job] done\nexit 0")), Some("» [agent-job] done\n  exit 0".into()));
+        assert_eq!(f.line(&msg("tool", "Bash {}")), None, "tools show only with -v");
+        assert_eq!(f.line(&msg("agent", "Hi.")), Some("Hi.\n".into()));
+        let state = |busy: bool| json!({"event": "state", "state": {"busy": busy, "since": util::now_iso(), "effort": "xhigh"}});
+        assert_eq!(f.line(&state(true)), Some("· working at effort xhigh".into()));
+        assert_eq!(f.line(&state(true)), None, "only the start and end of a turn show");
+        assert_eq!(f.line(&state(false)), Some("· idle after 0 min".into()));
+        assert_eq!(f.line(&json!({"event": "message", "kind": "agent", "text": "one ", "more": true})), None);
+        assert_eq!(f.line(&msg("agent", "message")), Some("one message\n".into()), "pages join");
     }
 }

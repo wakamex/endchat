@@ -29,7 +29,7 @@ endchat sim                 # synthetic chat against a model of the prompt cache
 
 `contrib/endchat@.service` is a systemd user unit that runs one `serve` per profile.
 
-`say` prints the reply; `endchat`, or `endchat chat NAME`, does the same for each line typed, with `-v` for tool calls and their results, and works with or without a running server. A message sent while a turn runs is queued and reaches that turn between tool calls, or starts the next turn.
+`say` prints the reply; `endchat`, or `endchat chat NAME`, does the same for each line typed, with `-v` for tool calls and their results, and works with or without a running server. A message sent while a turn runs is queued and reaches that turn between tool calls, or starts the next turn. A line ending in `\` continues on the next, and a paste arrives as one message. Through a running server, the chat follows the profile: it shows every message as it is logged, whoever sent it (lines typed elsewhere are marked `»`), and when each turn starts and ends. A turn's steps are logged while AOP runs it, so a long turn shows its tool calls as it makes them, and `state.json` in the profile always says whether a turn is running, since when, at what effort, its last step and how many messages wait for it, for anything that shows the agent as busy or idle; `endchat status` starts with the same.
 
 ## Configuration
 
@@ -106,6 +106,7 @@ tree.idx                the same, keyed by node slot
 view.json               the chat view and the compaction view as last saved
 raw.json                with raw: where the raw history starts
 units.txt               with watch_units: units still being watched
+state.json              busy or idle, since when, effort, last step and queued messages
 censored.json           the original text of each censored message
 effort.json             with effort_control: the effort set by `endchat effort`
 ledger.jsonl            every AOP call with its usage, for the cache-read ratios

@@ -52,13 +52,15 @@ pub struct Status {
     pub turn_cache_read_ratio: Option<f64>,
     pub compaction_cache_read_ratio: Option<f64>,
     pub last_error: Option<String>,
+    pub activity: String,
 }
 
 impl Status {
     pub fn render(&self) -> String {
         let pct = |r: Option<f64>| r.map_or("none yet".to_owned(), |r| format!("{:.1}%", r * 100.0));
         format!(
-            "messages: {}\nview: {} lines, {} bytes{}\ncompaction view: {} bytes\nunsummarized messages: {}\nmerges ready: {}\nrunning calls: {}\ncache read, turns: {}\ncache read, compactions: {}\nlast error: {}\n",
+            "state: {}\nmessages: {}\nview: {} lines, {} bytes{}\ncompaction view: {} bytes\nunsummarized messages: {}\nmerges ready: {}\nrunning calls: {}\ncache read, turns: {}\ncache read, compactions: {}\nlast error: {}\n",
+            self.activity,
             self.messages,
             self.view_lines,
             self.view_bytes,
@@ -70,6 +72,38 @@ impl Status {
             pct(self.turn_cache_read_ratio),
             pct(self.compaction_cache_read_ratio),
             self.last_error.as_deref().unwrap_or("none")
+        )
+    }
+}
+
+/// What the profile is doing, kept in `state.json` for anything watching it, such as a terminal
+/// that shows the agent as busy or idle, and sent to `endchat chat` as it changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Activity {
+    pub busy: bool,
+    /// When the running turn started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The turn's latest step: its last tool call, or that it is writing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doing: Option<String>,
+    /// Messages waiting for the running turn.
+    pub queued: usize,
+}
+
+impl Activity {
+    pub fn render(&self) -> String {
+        if !self.busy {
+            return "idle".to_owned();
+        }
+        format!(
+            "busy since {}{}{}{}",
+            self.since.as_deref().unwrap_or("?"),
+            self.effort.as_deref().map_or(String::new(), |e| format!(" at effort {e}")),
+            self.doing.as_deref().map_or(String::new(), |d| format!("; last: {d}")),
+            if self.queued > 0 { format!("; {} queued", self.queued) } else { String::new() }
         )
     }
 }
@@ -90,6 +124,7 @@ pub struct Engine {
     /// them between tool calls, or each starts a turn after it.
     pub inbox: Mutex<VecDeque<(String, Option<String>)>>,
     pub turn_running: AtomicBool,
+    activity: Mutex<Activity>,
 }
 
 impl Engine {
@@ -124,7 +159,31 @@ impl Engine {
             stop: AtomicBool::new(false),
             inbox: Mutex::new(VecDeque::new()),
             turn_running: AtomicBool::new(false),
+            activity: Mutex::new(Activity::default()),
         }))
+        .inspect(|e| e.set_activity(|a| *a = Activity::default()))
+    }
+
+    pub fn activity(&self) -> Activity {
+        self.activity.lock().expect("activity lock poisoned").clone()
+    }
+
+    /// Change the activity, write `state.json` and wake anything following the profile. Must not
+    /// be called with the inbox locked.
+    pub fn set_activity(&self, f: impl FnOnce(&mut Activity)) {
+        let queued = self.inbox.lock().expect("inbox lock poisoned").len();
+        let a = {
+            let mut a = self.activity.lock().expect("activity lock poisoned");
+            f(&mut a);
+            a.queued = queued;
+            a.clone()
+        };
+        let tmp = self.dir.join("state.json.tmp");
+        let written = serde_json::to_string(&a).map_err(std::io::Error::other).and_then(|s| fs::write(&tmp, s)).and_then(|()| fs::rename(&tmp, self.dir.join("state.json")));
+        if let Err(e) = written {
+            eprintln!("endchat: cannot write state.json: {e}");
+        }
+        self.changed();
     }
 
     pub fn mem(&self) -> MutexGuard<'_, Memory> {
@@ -231,6 +290,7 @@ impl Engine {
             turn_cache_read_ratio: None,
             compaction_cache_read_ratio: None,
             last_error: self.last_error.lock().expect("error lock poisoned").clone(),
+            activity: self.activity().render(),
         }
         .with_ratios(self.cache_ratio("turn"), self.cache_ratio("compaction"))
     }

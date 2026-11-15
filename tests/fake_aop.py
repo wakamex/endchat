@@ -5,7 +5,7 @@ It checks every `run` invocation against the real `aop run --dry-run` when the r
 installed (so an invalid flag or model fails here exactly as it would for real), then answers from a
 scenario file instead of calling a model. State lives in $FAKE_AOP_DIR.
 """
-import fcntl, json, os, shutil, subprocess, sys
+import fcntl, json, os, shutil, subprocess, sys, time
 
 D = os.environ["FAKE_AOP_DIR"]
 KNOWN_RUN = {"--agent", "--model", "--effort", "--profile", "--tools", "--system-prompt-file", "--prompt-file", "--prompt-parts", "--timeout", "--workdir"}
@@ -111,9 +111,17 @@ def finish(run_id, reply, prompt, scenario, ok=True, refusal=None):
     runs = os.path.join(os.getcwd(), ".aop", "runs", run_id)
     os.makedirs(runs, exist_ok=True)
     events = scenario.get("events", {}).get(str(counter("event_calls")), None)
+    live = scenario.get("live_seconds")
+    if live:
+        # As AOP does: the run record first, then each event as the harness emits it.
+        with open(os.path.join(runs, "request.json"), "w") as f:
+            json.dump({"run_id": run_id, "prompt": prompt}, f)
     with open(os.path.join(runs, "events.jsonl"), "w") as f:
         for ev in events if events is not None else [{"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}}]:
             f.write(json.dumps(ev) + "\n")
+            if live:
+                f.flush()
+                time.sleep(live)
     print(json.dumps(result))
     sys.exit(0 if ok else 1)
 

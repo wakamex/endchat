@@ -34,7 +34,7 @@ fn status_zoom_and_check_open_an_idle_profile_directly() {
     let p = dir.path().to_str().unwrap();
     let o = endchat(&["status", p]);
     assert!(o.status.success(), "{}", text(&o));
-    assert!(text(&o).starts_with("messages: 0\n"), "{}", text(&o));
+    assert!(text(&o).starts_with("state: idle\nmessages: 0\n"), "{}", text(&o));
     let o = endchat(&["check", p]);
     assert!(o.status.success() && text(&o).starts_with("ok:"), "{}", text(&o));
     let o = endchat(&["zoom", p, "0", "1"]);
@@ -132,5 +132,5 @@ fn chat_without_a_server_answers_each_line_and_keeps_its_history() {
     let out = String::from_utf8_lossy(&o.stdout);
     assert!(out.contains("Hi there.") && out.contains("Still here."), "{}", text(&o));
     assert!(text(&o).contains("no server running, so this process owns the profile"));
-    assert!(text(&endchat(&["status", profile.to_str().unwrap()])).starts_with("messages: 4\n"), "two exchanges are logged");
+    assert!(text(&endchat(&["status", profile.to_str().unwrap()])).starts_with("state: idle\nmessages: 4\n"), "two exchanges are logged");
 }

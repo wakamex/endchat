@@ -159,6 +159,8 @@ pub async fn say(engine: Arc<Engine>, text: String, date: Option<String>, tx: Un
         let mut inbox = engine.inbox.lock().expect("inbox lock poisoned");
         if engine.turn_running.swap(true, Ordering::SeqCst) {
             inbox.push_back((text, date));
+            drop(inbox);
+            engine.set_activity(|_| {});
             emit(&tx, TurnEvent::Queued);
             emit(&tx, TurnEvent::Done);
             return Ok(());
@@ -182,6 +184,7 @@ pub async fn say(engine: Arc<Engine>, text: String, date: Option<String>, tx: Un
             engine.turn_running.store(false, Ordering::SeqCst);
         }
     }
+    engine.set_activity(|a| *a = crate::engine::Activity::default());
     emit(&tx, TurnEvent::Done);
     outcome
 }
@@ -250,14 +253,17 @@ fn log(engine: &Engine, tx: &UnboundedSender<TurnEvent>, kind: Kind, text: &str,
 
 /// Log what a run did, in order, and watch the units its tools started. Returns the calls the model
 /// made as text, taken from its final message.
-fn log_run(engine: &Arc<Engine>, tx: &UnboundedSender<TurnEvent>, aop: &crate::aop::Aop, r: &AopResult) -> Result<Vec<ToolCall>> {
-    let mut events = std::fs::read_to_string(aop.events_path(&r.run_id)).map(|s| parse_claude(&s)).unwrap_or_default();
+/// Log the events of a finished run after the first `skip`, which were logged while it ran.
+fn log_run(engine: &Arc<Engine>, tx: &UnboundedSender<TurnEvent>, aop: &crate::aop::Aop, r: &AopResult, skip: usize) -> Result<Vec<ToolCall>> {
+    let all = std::fs::read_to_string(aop.events_path(&r.run_id)).map(|s| parse_claude(&s)).unwrap_or_default();
+    let none = all.is_empty();
+    let mut events: Vec<Event> = all.into_iter().skip(skip).collect();
     // The text of a refused run is the harness's error, not a reply.
     let refused = !r.succeeded && r.refusal.is_some();
     if refused {
         events.retain(|e| !matches!(e, Event::Text(_)));
     }
-    if events.is_empty() && !refused {
+    if none && !refused {
         eprintln!("endchat: no readable events for run {}; logging its final message only", r.run_id);
         let text = strip_calls(r.reply(), &cmds(engine));
         if !text.is_empty() {
@@ -265,25 +271,95 @@ fn log_run(engine: &Arc<Engine>, tx: &UnboundedSender<TurnEvent>, aop: &crate::a
         }
     }
     for e in events {
-        match e {
-            Event::Text(t) => {
-                let text = strip_calls(&t, &cmds(engine));
-                if !text.is_empty() {
-                    log(engine, tx, Kind::Agent, &text, &r.run_id)?;
-                }
-            }
-            Event::ToolCall { name, input } => log(engine, tx, Kind::Tool, &format!("{name} {input}"), &r.run_id)?,
-            Event::ToolResult(t) => {
-                if engine.cfg.turn.watch_units {
-                    for name in crate::units::started(&t) {
-                        crate::units::watch(engine.clone(), name);
-                    }
-                }
-                log(engine, tx, Kind::Echo, &t, &r.run_id)?
-            }
-        }
+        log_event(engine, tx, e, &r.run_id)?;
     }
     Ok(parse_calls(r.reply(), &cmds(engine)))
+}
+
+fn log_event(engine: &Arc<Engine>, tx: &UnboundedSender<TurnEvent>, e: Event, run: &str) -> Result<()> {
+    match e {
+        Event::Text(t) => {
+            let text = strip_calls(&t, &cmds(engine));
+            if !text.is_empty() {
+                log(engine, tx, Kind::Agent, &text, run)?;
+                engine.set_activity(|a| a.doing = Some("writing".into()));
+            }
+        }
+        Event::ToolCall { name, input } => {
+            let call = format!("{name} {input}");
+            log(engine, tx, Kind::Tool, &call, run)?;
+            engine.set_activity(|a| a.doing = Some(call.chars().take(160).collect()));
+        }
+        Event::ToolResult(t) => {
+            if engine.cfg.turn.watch_units {
+                for name in crate::units::started(&t) {
+                    crate::units::watch(engine.clone(), name);
+                }
+            }
+            log(engine, tx, Kind::Echo, &t, run)?
+        }
+    }
+    Ok(())
+}
+
+/// Await `run` while logging its events as AOP writes them, so a long turn shows its steps as it
+/// takes them. The run is found among the profile's run records by its prompt. A text is logged only
+/// once a later event follows it: the run's last text may be a refusal's error, which `log_run`
+/// handles. Returns the result and how many events were logged.
+async fn live<F: std::future::Future<Output = Result<AopResult>>>(engine: &Arc<Engine>, tx: &UnboundedSender<TurnEvent>, prompt: &str, run: F) -> (Result<AopResult>, usize) {
+    let (done_tx, done) = tokio::sync::watch::channel(false);
+    let tail = tokio::spawn(tail_run(engine.clone(), tx.clone(), prompt.chars().take(300).collect(), std::time::SystemTime::now(), done));
+    let result = run.await;
+    let _ = done_tx.send(true);
+    (result, tail.await.unwrap_or(0))
+}
+
+async fn tail_run(engine: Arc<Engine>, tx: UnboundedSender<TurnEvent>, prefix: String, after: std::time::SystemTime, mut done: tokio::sync::watch::Receiver<bool>) -> usize {
+    let runs = engine.dir.join(".aop").join("runs");
+    let mut found: Option<(PathBuf, String)> = None;
+    let (mut offset, mut logged, mut held) = (0usize, 0usize, None::<Event>);
+    loop {
+        let finished = *done.borrow();
+        if found.is_none() {
+            found = find_run(&runs, &prefix, after);
+        }
+        if let Some((dir, run)) = &found {
+            let data = std::fs::read(dir.join("events.jsonl")).unwrap_or_default();
+            let end = data.get(offset..).and_then(|d| d.iter().rposition(|&b| b == b'\n')).map_or(offset, |p| offset + p + 1);
+            for e in parse_claude(&String::from_utf8_lossy(&data[offset.min(end)..end])) {
+                let mut ready: Vec<Event> = held.take().into_iter().collect();
+                if matches!(e, Event::Text(_)) {
+                    held = Some(e);
+                } else {
+                    ready.push(e);
+                }
+                for e in ready {
+                    if let Err(err) = log_event(&engine, &tx, e, run) {
+                        eprintln!("endchat: cannot log a live event: {err}");
+                    }
+                    logged += 1;
+                }
+            }
+            offset = end;
+        }
+        if finished {
+            return logged;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), done.changed()).await;
+    }
+}
+
+/// The run record started after `after` whose prompt begins with `prefix`, and its id.
+fn find_run(runs: &std::path::Path, prefix: &str, after: std::time::SystemTime) -> Option<(PathBuf, String)> {
+    let since = after - std::time::Duration::from_secs(2);
+    std::fs::read_dir(runs).ok()?.flatten().find_map(|d| {
+        if d.metadata().ok()?.modified().ok()? < since {
+            return None;
+        }
+        let req: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.path().join("request.json")).ok()?).ok()?;
+        let prompt = req.get("prompt")?.as_str()?;
+        (prompt.starts_with(prefix) || prefix.starts_with(prompt)).then(|| (d.path(), req.get("run_id").and_then(|r| r.as_str()).map_or_else(|| d.file_name().to_string_lossy().into_owned(), str::to_owned)))
+    })
 }
 
 fn answer(engine: &Engine, call: &ToolCall) -> String {
@@ -322,6 +398,9 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
         }
     }
     let effort = crate::effort::take(&engine.dir, &t.effort)?;
+    engine.set_activity(|a| {
+        *a = crate::engine::Activity { busy: true, since: Some(now_iso()), effort: Some(effort.clone()), ..Default::default() };
+    });
     let mut note = t.tail_note.clone().unwrap_or_else(|| if t.raw { String::new() } else { TAIL_NOTE.to_owned() });
     if t.effort_control {
         note = format!("{}{}", if note.is_empty() { String::new() } else { note + "\n" }, crate::effort::state_line(&engine.dir, &effort));
@@ -347,7 +426,7 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
     let mut runs: Vec<String> = Vec::new();
     let parts = engine.cfg.turn.prompt_parts && prompt.has_mark();
     let file = write_prompt(engine, &if parts { prompt.parts_json() } else { prompt.text() })?;
-    let mut result = aop.run(&run_args(engine, file.clone(), parts, index, &effort)).await;
+    let (mut result, mut skip) = live(engine, tx, &prompt.text(), aop.run(&run_args(engine, file.clone(), parts, index, &effort))).await;
     let _ = std::fs::remove_file(&file);
     let refused = |r: &Result<AopResult>| matches!(r, Ok(r) if !r.succeeded && r.refusal.is_some());
     let mut cleared = false; // the refusal was got round by censoring
@@ -370,7 +449,7 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             let shown = if ids.contains(&i) { crate::censor::notice(i) } else { text.to_owned() };
             let retry = crate::raw::prompt_to(&mut engine.mem(), &lim, &tail_of(&shown), i)?;
             let file = write_prompt(engine, &if parts { retry.parts_json() } else { retry.text() })?;
-            result = aop.run(&run_args(engine, file.clone(), parts, index, &effort)).await;
+            (result, skip) = live(engine, tx, &retry.text(), aop.run(&run_args(engine, file.clone(), parts, index, &effort))).await;
             let _ = std::fs::remove_file(&file);
             cleared = !refused(&result);
             eprintln!("endchat: a turn was refused by the model's safeguards; without messages {ids:?} it was {}", if cleared { "not, so they stay censored" } else { "too" });
@@ -391,7 +470,7 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
         };
         runs.push(r.run_id.clone());
         engine.record_calls("turn", &[Call { run_id: r.run_id.clone(), model: r.model.clone(), usage: r.usage, ok: r.succeeded }]);
-        let calls = match log_run(engine, tx, &aop, &r) {
+        let calls = match log_run(engine, tx, &aop, &r, skip) {
             Ok(c) => c,
             Err(e) => {
                 outcome = Err(e);
@@ -431,7 +510,7 @@ async fn run_turn(engine: &Arc<Engine>, text: &str, date: Option<&str>, tx: &Unb
             next += &format!("The user sent this while you worked:\n{q}\n");
         }
         let file = write_prompt(engine, &next)?;
-        result = aop.resume(&r.run_id, &file, engine.cfg.turn.timeout).await;
+        (result, skip) = live(engine, tx, &next, aop.resume(&r.run_id, &file, engine.cfg.turn.timeout)).await;
         let _ = std::fs::remove_file(&file);
     }
     if cleanup {
@@ -764,6 +843,35 @@ mod tests {
         assert_eq!((effort(0), effort(1)), ("max".to_owned(), "high".to_owned()));
         let prompt = runs[1]["prompt"].as_str().unwrap();
         assert!(prompt.contains(&format!("effort: high. Set it with `{} effort {} LEVEL`", std::env::current_exe().unwrap().display(), d.path().display())), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn a_running_turn_logs_its_steps_as_they_happen_and_each_once() {
+        let events = json!([
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Looking."}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "a.txt"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}},
+        ]);
+        let fake = FakeAop::new(json!({"live_seconds": 1.2, "turn_replies": ["Done."], "events": {"1": events}}));
+        let d = tempfile::tempdir().unwrap();
+        let e = raw_engine(&fake, d.path());
+        let (tx, rx) = unbounded_channel();
+        let turn = tokio::spawn(say(e.clone(), "go".into(), None, tx));
+        let mut seen_live = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if e.activity().busy && texts(&e).iter().any(|t| t.starts_with("Bash ")) {
+                seen_live = true;
+                break;
+            }
+        }
+        turn.await.unwrap().unwrap();
+        collect(rx).await;
+        assert!(seen_live, "the tool call was logged while the turn ran");
+        assert_eq!(texts(&e), ["go", "Looking.", "Bash {\"command\":\"ls\"}", "a.txt", "Done."]);
+        assert!(!e.activity().busy);
+        let state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.path().join("state.json")).unwrap()).unwrap();
+        assert_eq!(state["busy"], false);
     }
 
     #[test]
