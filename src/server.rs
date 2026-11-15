@@ -147,7 +147,7 @@ pub async fn serve(engine: Arc<Engine>) -> Result<()> {
         crate::units::resume(&engine);
     }
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    eprintln!("endchat: serving {} ({} messages)", engine.dir.display(), engine.status().messages);
+    eprintln!("endchat {}: serving {} ({} messages)", crate::BUILD, engine.dir.display(), engine.status().messages);
     loop {
         tokio::select! {
             conn = listener.accept() => {
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(lines, [json!({"event": "accepted", "i": 1}), json!({"event": "agent", "text": "Hello back."}), json!({"event": "done"})]);
         let mut status = Vec::new();
         ask(d.path(), &json!({"cmd": "status"}), |v| status.push(v)).await.unwrap();
-        assert!(status[0]["text"].as_str().unwrap().starts_with("state: idle\nmessages: 3\n"));
+        assert!(status[0]["text"].as_str().unwrap().starts_with(&format!("state: idle\nbuild: endchat {}\nmessages: 3\n", crate::BUILD)));
         let mut z = Vec::new();
         ask(d.path(), &json!({"cmd": "zoom", "id": 0, "n": 1}), |v| z.push(v)).await.unwrap();
         assert_eq!(z[0], json!({"ok": true, "text": "user: earlier"}));

@@ -21,6 +21,15 @@ fn help_lists_every_subcommand() {
 }
 
 #[test]
+fn version_names_the_commit_the_binary_was_built_from() {
+    let o = endchat(&["--version"]);
+    let v = String::from_utf8_lossy(&o.stdout).into_owned();
+    let commit = v.trim().strip_prefix("endchat 0.1.0 (").and_then(|r| r.strip_suffix(')')).unwrap_or_else(|| panic!("{v}"));
+    let hash = commit.split(' ').next().unwrap();
+    assert!(hash == "unknown" || (hash.len() == 7 && hash.chars().all(|c| c.is_ascii_hexdigit())), "{v}");
+}
+
+#[test]
 fn no_command_chats_with_the_main_profile() {
     let home = tempfile::tempdir().unwrap();
     let o = Command::new(env!("CARGO_BIN_EXE_endchat")).env("HOME", home.path()).stdin(std::process::Stdio::null()).output().unwrap();
@@ -34,7 +43,7 @@ fn status_zoom_and_check_open_an_idle_profile_directly() {
     let p = dir.path().to_str().unwrap();
     let o = endchat(&["status", p]);
     assert!(o.status.success(), "{}", text(&o));
-    assert!(text(&o).starts_with("state: idle\nmessages: 0\n"), "{}", text(&o));
+    assert!(text(&o).starts_with("state: idle\nbuild: endchat 0.1.0 (") && text(&o).contains("\nmessages: 0\n"), "{}", text(&o));
     let o = endchat(&["check", p]);
     assert!(o.status.success() && text(&o).starts_with("ok:"), "{}", text(&o));
     let o = endchat(&["zoom", p, "0", "1"]);
@@ -132,7 +141,7 @@ fn chat_without_a_server_answers_each_line_and_keeps_its_history() {
     let out = String::from_utf8_lossy(&o.stdout);
     assert!(out.contains("Hi there.") && out.contains("Still here."), "{}", text(&o));
     assert!(text(&o).contains("no server running, so this process owns the profile"));
-    assert!(text(&endchat(&["status", profile.to_str().unwrap()])).starts_with("state: idle\nmessages: 4\n"), "two exchanges are logged");
+    assert!(text(&endchat(&["status", profile.to_str().unwrap()])).contains("\nmessages: 4\n"), "two exchanges are logged");
 }
 
 #[test]

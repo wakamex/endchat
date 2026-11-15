@@ -35,8 +35,11 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// The version and the commit the binary was built from (see build.rs).
+pub const BUILD: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("ENDCHAT_COMMIT"), ")");
+
 #[derive(Parser)]
-#[command(version, about = "A chat that never ends: every message logged, memory kept as a tree of summaries, every model call made through AOP. With no command, chat with the profile main.")]
+#[command(version = BUILD, about = "A chat that never ends: every message logged, memory kept as a tree of summaries, every model call made through AOP. With no command, chat with the profile main.")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

@@ -59,8 +59,9 @@ impl Status {
     pub fn render(&self) -> String {
         let pct = |r: Option<f64>| r.map_or("none yet".to_owned(), |r| format!("{:.1}%", r * 100.0));
         format!(
-            "state: {}\nmessages: {}\nview: {} lines, {} bytes{}\ncompaction view: {} bytes\nunsummarized messages: {}\nmerges ready: {}\nrunning calls: {}\ncache read, turns: {}\ncache read, compactions: {}\nlast error: {}\n",
+            "state: {}\nbuild: endchat {}\nmessages: {}\nview: {} lines, {} bytes{}\ncompaction view: {} bytes\nunsummarized messages: {}\nmerges ready: {}\nrunning calls: {}\ncache read, turns: {}\ncache read, compactions: {}\nlast error: {}\n",
             self.activity,
+            crate::BUILD,
             self.messages,
             self.view_lines,
             self.view_bytes,
