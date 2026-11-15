@@ -87,8 +87,9 @@ pub struct Turn {
     /// Claude Code session files keep it, with a one-line stub. Kept whole, each file would hold the
     /// whole prompt, growing the session store and repeating the chat in searches.
     pub stub_sessions: bool,
-    /// With `native`: tell the model each turn the effort it runs at and how to change it with
-    /// `endchat effort`, a default or the next turn's.
+    /// Unfinished, and refused at load: tell the model each turn the effort it runs at and how to
+    /// change it with `endchat effort`. Each change misses the prompt cache, so this needs a rule
+    /// for when a change pays before it is turned on.
     pub effort_control: bool,
 }
 
@@ -168,8 +169,10 @@ impl Config {
         if cfg.turn.native && (cfg.turn.profile != "host" || cfg.turn.workdir.is_none()) {
             return msg("turn.native = true needs turn.profile = \"host\" and a turn.workdir");
         }
-        if cfg.turn.effort_control && !cfg.turn.native {
-            return msg("turn.effort_control = true needs turn.native = true, whose tools can run endchat");
+        if cfg.turn.effort_control {
+            // Unfinished: a turn at a different effort than the one before it misses the prompt
+            // cache, so letting the model change it every turn needs a policy for when it pays.
+            return msg("turn.effort_control is unfinished and turned off: changing effort between turns invalidates the prompt cache");
         }
         if !cfg.compactor.tree && !cfg.turn.raw {
             return msg("compactor.tree = false needs turn.raw = true");
@@ -233,5 +236,7 @@ mod tests {
         fs::write(d.path().join("config.toml"), "[compactor]\nmodel = \"x\"\n[turn]\nprofile = \"host\"\nallow_host = true\n").unwrap();
         let c = Config::load(d.path()).unwrap();
         assert_eq!((c.compactor.model.as_str(), c.compactor.workers), ("x", 8));
+        fs::write(d.path().join("config.toml"), "[turn]\neffort_control = true\n").unwrap();
+        assert!(Config::load(d.path()).unwrap_err().to_string().contains("unfinished"), "effort control is off until it has a cache policy");
     }
 }

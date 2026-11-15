@@ -68,7 +68,6 @@ stub_chars = 1000    # with raw: longer tool results are stubbed once older than
 native = false       # run turns as plain Claude Code in workdir: its own system prompt, CLAUDE.md, memory, skills, tools and sessions; needs profile = "host" and workdir, and no_web = false for Bash and web tools
 watch_units = false  # tell the chat when a systemd unit its tools started stops
 stub_sessions = false   # with native: stub the history in each turn's Claude Code session files when it ends
-effort_control = false  # with native: the model sees its effort each turn and can change it with endchat effort
 
 [turn.commands]      # extra text tools: a reply line `name(ARG)` or `name ARG` runs `program PROFILE_DIR ARG`
 # search = "/path/to/search_tool"
@@ -94,7 +93,7 @@ With `native = true` as well, turns run as Claude Code does on its own in `workd
 
 With `watch_units = true`, a tool result containing `Running as unit: NAME`, which `systemd-run` prints, makes endchat poll that unit and send a `[systemd]` message when it stops, which starts a turn. Watched units are kept in `units.txt` across restarts.
 
-With `effort_control = true` each turn's state block names the effort the turn runs at and the command that changes it, so the model can raise its effort for a long debugging chain and lower it for routine steps. `endchat effort PROFILE LEVEL` sets a default that holds until changed, `--next` sets the next turn only, `--reset` returns to `turn.effort`, and with no level it prints the current setting. The setting is kept in `effort.json`, and a change made by the model shows in the chat as its tool call.
+`endchat effort PROFILE LEVEL` sets the effort of the profile's turns from the next turn on, overriding `turn.effort` until changed; `--next` sets the next turn only, `--reset` returns to `turn.effort`, and with no level it prints the current setting. The setting is kept in `effort.json`. A turn at a different effort than the one before it misses the prompt cache, so each change costs one uncached prompt. Letting the model change its own effort (`turn.effort_control`) is unfinished and refused at load: it needs a rule for when a change is worth that cost.
 
 ## What is stored
 
@@ -108,7 +107,7 @@ raw.json                with raw: where the raw history starts
 units.txt               with watch_units: units still being watched
 state.json              busy or idle, since when, effort, last step and queued messages
 censored.json           the original text of each censored message
-effort.json             with effort_control: the effort set by `endchat effort`
+effort.json             the effort set by `endchat effort`
 ledger.jsonl            every AOP call with its usage, for the cache-read ratios
 turns.jsonl             one line per finished turn: the log length at its end and whether it succeeded
 system-prompt.txt       the system prompt in use

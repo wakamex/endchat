@@ -1,7 +1,8 @@
-//! The reasoning effort of a profile's turns. With `turn.effort_control` each turn's state block
-//! names the effort the turn runs at and the command that changes it, so the model can match its
-//! effort to the work: `endchat effort PROFILE LEVEL` sets a default that holds until changed, and
-//! `--next` sets the next turn only. Kept in `effort.json`; `turn.effort` applies when neither is set.
+//! The reasoning effort of a profile's turns: `endchat effort PROFILE LEVEL` sets a default that
+//! holds until changed, and `--next` sets the next turn only. Kept in `effort.json`; `turn.effort`
+//! applies when neither is set. A turn at a different effort than the one before it misses the
+//! prompt cache. `turn.effort_control`, which tells the model its effort and this command every
+//! turn, is unfinished and refused at load until there is a rule for when a change pays.
 
 use crate::error::{Result, msg};
 use serde::{Deserialize, Serialize};
