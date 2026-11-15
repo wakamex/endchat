@@ -172,6 +172,13 @@ pub async fn say(engine: Arc<Engine>, text: String, date: Option<String>, tx: Un
         let r = run_turn(&engine, &m, d.as_deref(), &tx).await;
         engine.turn_ended(r.is_ok());
         if let Err(e) = r {
+            // The next turn sees this turn's steps with no reply; the note says why.
+            let why = e.to_string();
+            let how = if why.contains("(timed out)") { "timed out" } else { "failed" };
+            let note = format!("[endchat] the turn for the message above {how} before it finished: {}", why.chars().take(600).collect::<String>());
+            if let Err(err) = engine.append(Kind::Note, &note, None) {
+                eprintln!("endchat: cannot note the failed turn: {err}");
+            }
             engine.set_error(format!("turn failed: {e}"));
             emit(&tx, TurnEvent::Error(e.to_string()));
             if outcome.is_ok() {
@@ -803,6 +810,22 @@ mod tests {
         assert_eq!(runs.len(), 4, "the reply, then the refused turn, without its message, and without the last reply");
         let last = runs[3]["prompt"].as_str().unwrap();
         assert!(last.ends_with("\nnext") && last.contains(&format!("1|agent: {}\n", crate::censor::notice(1))), "{last}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_turn_leaves_a_note_the_next_turn_sees() {
+        let fake = FakeAop::new(json!({"fail_first": 1, "turn_replies": ["Back."]}));
+        let d = tempfile::tempdir().unwrap();
+        let e = raw_engine(&fake, d.path());
+        for text in ["first", "second"] {
+            let (tx, rx) = unbounded_channel();
+            let _ = say(e.clone(), text.into(), None, tx).await;
+            collect(rx).await;
+        }
+        let note = texts(&e)[1].clone();
+        assert!(note.starts_with("[endchat] the turn for the message above failed before it finished: run fake-"), "{note}");
+        let runs: Vec<_> = fake.calls().into_iter().filter(|c| c["cmd"] == "run").collect();
+        assert!(runs.last().unwrap()["prompt"].as_str().unwrap().contains(&format!("1|note: {note}\n")));
     }
 
     #[tokio::test]
