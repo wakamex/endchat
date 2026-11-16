@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <!-- endchat: a speech bubble whose three dots say the conversation goes on. One colour, so a
+       terminal's tab bar can tint it; the dots are holes. 120 units square, the grid Wakterm's
+       harness icons use. -->
+  <path fill-rule="evenodd" fill="#000" d="
+    M 26 12 H 94 Q 112 12 112 30 V 70 Q 112 88 94 88 H 50 L 22 108 L 30 88 H 26 Q 8 88 8 70 V 30 Q 8 12 26 12 Z
+    M 36 41 A 9 9 0 1 0 36.01 41 Z
+    M 60 41 A 9 9 0 1 0 60.01 41 Z
+    M 84 41 A 9 9 0 1 0 84.01 41 Z"/>
+</svg>
