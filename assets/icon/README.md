@@ -1,6 +1,6 @@
 # endchat icon
 
-`make_icon.py` is the source: it computes a spiral, for a conversation that never ends, as a band of even width with round ends, and writes it as `endchat-icon.svg` and as `wakterm-poly.rs`. It is one colour so a tab bar can tint it, and was chosen over a speech bubble, which read as a messaging app, and a prompt chevron with dots, which read as a plain terminal (`>_`). It stays legible at 14 and 16 pixels on light and dark backgrounds.
+`make_icon.py` is the source: a line standing on a wall, the chat running down to its end, where every turn works. It writes the shape as `endchat-icon.svg` and as `wakterm-poly.rs` from the same two rounded rectangles. It is one colour so a tab bar can tint it, and stays legible at 14 and 16 pixels on light and dark backgrounds. It was chosen from a sheet of variations on a line meeting a wall (an arrow, falling dots, a taper, bricks and others) for being the clearest at tab size; earlier candidates were a speech bubble, which read as a messaging app, and a spiral, which said "never ends" but not where a turn works.
 
 `update.sh` runs `make_icon.py` and makes PNGs from the SVG with [ImageMagick](https://imagemagick.org/):
 
