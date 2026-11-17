@@ -39,6 +39,9 @@ pub struct RunArgs {
     pub workdir: Option<PathBuf>,
     /// `host` only: the harness uses the real home, its own system prompt, settings and sessions (`--native-state`).
     pub native_state: bool,
+    /// Claude only: settings for this run alone, a JSON object passed as `--settings`
+    /// (`--claude-settings`); a resume keeps them.
+    pub claude_settings: Option<String>,
 }
 
 /// The fields of AOP's normalized result that endchat uses.
@@ -91,6 +94,9 @@ pub fn run_argv(a: &RunArgs) -> Vec<String> {
     }
     if a.native_state {
         v.push("--native-state".into());
+    }
+    if let Some(s) = &a.claude_settings {
+        v.extend(["--claude-settings".into(), s.clone()]);
     }
     v.extend([if a.parts { "--prompt-parts" } else { "--prompt-file" }.into(), a.prompt_file.display().to_string(), "--timeout".into(), a.timeout.to_string(), "--json".into()]);
     if let Some(t) = &a.task {
@@ -175,6 +181,7 @@ mod tests {
             task: None,
             workdir: None,
             native_state: false,
+            claude_settings: None,
         };
         assert_eq!(
             run_argv(&a).join(" "),
@@ -186,6 +193,8 @@ mod tests {
         assert!(!run_argv(&b).join(" ").contains("--prompt-file"));
         let host = RunArgs { profile: "host".into(), no_web: false, tools: None, system_prompt_file: None, workdir: Some("/code/x".into()), native_state: true, ..b.clone() };
         assert!(run_argv(&host).join(" ").ends_with("--profile host --workdir /code/x --native-state --prompt-parts /p/task.txt --timeout 120 --json"));
+        let pinned = RunArgs { claude_settings: Some(r#"{"enabledPlugins":{"cc-plugin-easel@builtin":false}}"#.into()), ..host.clone() };
+        assert!(run_argv(&pinned).join(" ").contains(r#"--native-state --claude-settings {"enabledPlugins":{"cc-plugin-easel@builtin":false}} --prompt-parts"#));
         assert_eq!(resume_argv("abc", Path::new("/p/r.txt"), 60).join(" "), "resume --prompt-file /p/r.txt --timeout 60 --json abc");
     }
 

@@ -91,6 +91,12 @@ pub struct Turn {
     /// change it with `endchat effort`. Each change misses the prompt cache, so this needs a rule
     /// for when a change pays before it is turned on.
     pub effort_control: bool,
+    /// With agent `claude`: Claude Code settings for every turn, passed to that run alone through
+    /// `aop --claude-settings` and kept by its resumes. A native turn is a new Claude Code session,
+    /// so anything that differs between sessions ahead of the history, such as a plugin a remote
+    /// flag switches on, makes the turn write its whole history to the prompt cache again; settings
+    /// here can hold such parts still.
+    pub claude_settings: Option<serde_json::Value>,
 }
 
 impl Default for Turn {
@@ -117,6 +123,7 @@ impl Default for Turn {
             watch_units: false,
             stub_sessions: false,
             effort_control: false,
+            claude_settings: None,
         }
     }
 }
@@ -168,6 +175,9 @@ impl Config {
         }
         if cfg.turn.native && (cfg.turn.profile != "host" || cfg.turn.workdir.is_none()) {
             return msg("turn.native = true needs turn.profile = \"host\" and a turn.workdir");
+        }
+        if cfg.turn.claude_settings.as_ref().is_some_and(|s| !s.is_object() || cfg.turn.agent != "claude") {
+            return msg("turn.claude_settings must be a table, and needs turn.agent = \"claude\"");
         }
         if cfg.turn.effort_control {
             // Unfinished: a turn at a different effort than the one before it misses the prompt

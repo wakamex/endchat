@@ -235,6 +235,7 @@ fn run_args(engine: &Engine, prompt_file: PathBuf, parts: bool, label: u64, effo
         task: (t.profile != "sealed" && !t.native).then(|| format!("endchat-turn-{label}")),
         workdir: if t.native { t.workdir.clone() } else { None },
         native_state: t.native,
+        claude_settings: t.claude_settings.as_ref().map(|s| s.to_string()),
     }
 }
 
@@ -310,25 +311,27 @@ fn log_event(engine: &Arc<Engine>, tx: &UnboundedSender<TurnEvent>, e: Event, ru
 }
 
 /// Await `run` while logging its events as AOP writes them, so a long turn shows its steps as it
-/// takes them. The run is found among the profile's run records by its prompt. A text is logged only
+/// takes them. The run is found among the profile's run records as the one created since it started
+/// whose prompt ends as this one does: every raw prompt starts alike, and the end holds the date and
+/// the new message. A text is logged only
 /// once a later event follows it: the run's last text may be a refusal's error, which `log_run`
 /// handles. Returns the result and how many events were logged.
 async fn live<F: std::future::Future<Output = Result<AopResult>>>(engine: &Arc<Engine>, tx: &UnboundedSender<TurnEvent>, prompt: &str, run: F) -> (Result<AopResult>, usize) {
     let (done_tx, done) = tokio::sync::watch::channel(false);
-    let tail = tokio::spawn(tail_run(engine.clone(), tx.clone(), prompt.chars().take(300).collect(), std::time::SystemTime::now(), done));
+    let tail = tokio::spawn(tail_run(engine.clone(), tx.clone(), tail_of_prompt(prompt), std::time::SystemTime::now(), done));
     let result = run.await;
     let _ = done_tx.send(true);
     (result, tail.await.unwrap_or(0))
 }
 
-async fn tail_run(engine: Arc<Engine>, tx: UnboundedSender<TurnEvent>, prefix: String, after: std::time::SystemTime, mut done: tokio::sync::watch::Receiver<bool>) -> usize {
+async fn tail_run(engine: Arc<Engine>, tx: UnboundedSender<TurnEvent>, ending: String, after: std::time::SystemTime, mut done: tokio::sync::watch::Receiver<bool>) -> usize {
     let runs = engine.dir.join(".aop").join("runs");
     let mut found: Option<(PathBuf, String)> = None;
     let (mut offset, mut logged, mut held) = (0usize, 0usize, None::<Event>);
     loop {
         let finished = *done.borrow();
         if found.is_none() {
-            found = find_run(&runs, &prefix, after);
+            found = find_run(&runs, &ending, after);
         }
         if let Some((dir, run)) = &found {
             let data = std::fs::read(dir.join("events.jsonl")).unwrap_or_default();
@@ -356,16 +359,24 @@ async fn tail_run(engine: Arc<Engine>, tx: UnboundedSender<TurnEvent>, prefix: S
     }
 }
 
-/// The run record started after `after` whose prompt begins with `prefix`, and its id.
-fn find_run(runs: &std::path::Path, prefix: &str, after: std::time::SystemTime) -> Option<(PathBuf, String)> {
-    let since = after - std::time::Duration::from_secs(2);
+/// The last 400 characters of a prompt, trimmed, by which its run record is recognized.
+fn tail_of_prompt(prompt: &str) -> String {
+    let p = prompt.trim_end();
+    p.chars().skip(p.chars().count().saturating_sub(400)).collect()
+}
+
+/// The run record created since a second before `after` whose prompt ends with `ending`, and its id.
+/// AOP records the creation time in UTC, as `now_iso` writes it, so the two compare as text.
+fn find_run(runs: &std::path::Path, ending: &str, after: std::time::SystemTime) -> Option<(PathBuf, String)> {
+    let secs = after.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64 - 1;
+    let since = crate::util::iso_from_unix(secs);
     std::fs::read_dir(runs).ok()?.flatten().find_map(|d| {
-        if d.metadata().ok()?.modified().ok()? < since {
+        let req: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.path().join("request.json")).ok()?).ok()?;
+        let created = req.get("created_at")?.as_str()?;
+        if created.get(..19)? < since.get(..19)? || tail_of_prompt(req.get("prompt")?.as_str()?) != ending {
             return None;
         }
-        let req: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.path().join("request.json")).ok()?).ok()?;
-        let prompt = req.get("prompt")?.as_str()?;
-        (prompt.starts_with(prefix) || prefix.starts_with(prompt)).then(|| (d.path(), req.get("run_id").and_then(|r| r.as_str()).map_or_else(|| d.file_name().to_string_lossy().into_owned(), str::to_owned)))
+        Some((d.path(), req.get("run_id").and_then(|r| r.as_str()).map_or_else(|| d.file_name().to_string_lossy().into_owned(), str::to_owned)))
     })
 }
 
@@ -810,6 +821,24 @@ mod tests {
         assert_eq!(runs.len(), 4, "the reply, then the refused turn, without its message, and without the last reply");
         let last = runs[3]["prompt"].as_str().unwrap();
         assert!(last.ends_with("\nnext") && last.contains(&format!("1|agent: {}\n", crate::censor::notice(1))), "{last}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_right_after_another_logs_its_own_steps_not_the_previous_ones() {
+        let step = |cmd: &str, out: &str, reply: &str| json!([
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": cmd}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": out}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}},
+        ]);
+        let fake = FakeAop::new(json!({"live_seconds": 0.4, "turn_replies": ["First.", "Second."], "events": {"1": step("ls", "a.txt", "First."), "2": step("pwd", "/w", "Second.")}}));
+        let d = tempfile::tempdir().unwrap();
+        let e = raw_engine(&fake, d.path());
+        for text in ["one", "two"] {
+            let (tx, rx) = unbounded_channel();
+            say(e.clone(), text.into(), None, tx).await.unwrap();
+            collect(rx).await;
+        }
+        assert_eq!(texts(&e), ["one", "Bash {\"command\":\"ls\"}", "a.txt", "First.", "two", "Bash {\"command\":\"pwd\"}", "/w", "Second."]);
     }
 
     #[tokio::test]

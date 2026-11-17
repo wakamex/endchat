@@ -115,7 +115,7 @@ def finish(run_id, reply, prompt, scenario, ok=True, refusal=None):
     if live:
         # As AOP does: the run record first, then each event as the harness emits it.
         with open(os.path.join(runs, "request.json"), "w") as f:
-            json.dump({"run_id": run_id, "prompt": prompt}, f)
+            json.dump({"run_id": run_id, "prompt": prompt, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())}, f)
     with open(os.path.join(runs, "events.jsonl"), "w") as f:
         for ev in events if events is not None else [{"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}}]:
             f.write(json.dumps(ev) + "\n")

@@ -68,6 +68,7 @@ stub_chars = 1000    # with raw: longer tool results are stubbed once older than
 native = false       # run turns as plain Claude Code in workdir: its own system prompt, CLAUDE.md, memory, skills, tools and sessions; needs profile = "host" and workdir, and no_web = false for Bash and web tools
 watch_units = false  # tell the chat when a systemd unit its tools started stops
 stub_sessions = false   # with native: stub the history in each turn's Claude Code session files when it ends
+# claude_settings = { enabledPlugins = { "cc-plugin-easel@builtin" = false } }   # Claude Code settings for every turn (aop --claude-settings)
 
 [turn.commands]      # extra text tools: a reply line `name(ARG)` or `name ARG` runs `program PROFILE_DIR ARG`
 # search = "/path/to/search_tool"
@@ -92,6 +93,8 @@ With `native = true` as well, turns run as Claude Code does on its own in `workd
 `contrib/claude_session.py SESSION.jsonl > history.json` turns a Claude Code session transcript into a file for `endchat import`, so an existing session's history can continue in endchat. With `--after-compaction summary.md` it keeps only what follows the session's last compaction and saves that compaction's summary, without Claude Code's resume instructions; `endchat import --summary summary.md` then seeds a raw profile with it, so endchat starts from the state the session was in. `contrib/turn_cache.py PROFILE` shows how each turn of a native profile used the prompt cache on its first call: the history size, what it read and wrote, and, for a turn that wrote its history again, whether a gap of over an hour, a cut, the system prompt or tools, or the context Claude Code puts ahead of the history changed since the previous turn.
 
 With `watch_units = true`, a tool result containing `Running as unit: NAME`, which `systemd-run` prints, makes endchat poll that unit and send a `[systemd]` message when it stops, which starts a turn. Watched units are kept in `units.txt` across restarts.
+
+A native turn is a new Claude Code session, which rebuilds everything ahead of endchat's history: system prompt, tools, and the context it puts first in the message (CLAUDE.md, the memory index, git status). When any of that differs from the previous turn, the turn writes its whole history to the prompt cache again; `contrib/turn_cache.py` shows which turns did and why. `turn.claude_settings` gives every turn the same Claude Code settings through `aop --claude-settings`, which can hold such parts still, for example turning off a built-in plugin that a remote flag switches on per session.
 
 `endchat effort PROFILE LEVEL` sets the effort of the profile's turns from the next turn on, overriding `turn.effort` until changed; `--next` sets the next turn only, `--reset` returns to `turn.effort`, and with no level it prints the current setting. The setting is kept in `effort.json`. A turn at a different effort than the one before it misses the prompt cache, so each change costs one uncached prompt. Letting the model change its own effort (`turn.effort_control`) is unfinished and refused at load: it needs a rule for when a change is worth that cost.
 
