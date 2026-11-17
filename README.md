@@ -68,7 +68,7 @@ stub_chars = 1000    # with raw: longer tool results are stubbed once older than
 native = false       # run turns as plain Claude Code in workdir: its own system prompt, CLAUDE.md, memory, skills, tools and sessions; needs profile = "host" and workdir, and no_web = false for Bash and web tools
 watch_units = false  # tell the chat when a systemd unit its tools started stops
 stub_sessions = false   # with native: stub the history in each turn's Claude Code session files when it ends
-# claude_settings = { enabledPlugins = { "cc-plugin-easel@builtin" = false } }   # Claude Code settings for every turn (aop --claude-settings)
+# claude_settings = { includeGitInstructions = false }   # Claude Code settings for every turn (aop --claude-settings)
 
 [turn.commands]      # extra text tools: a reply line `name(ARG)` or `name ARG` runs `program PROFILE_DIR ARG`
 # search = "/path/to/search_tool"
@@ -94,7 +94,7 @@ With `native = true` as well, turns run as Claude Code does on its own in `workd
 
 With `watch_units = true`, a tool result containing `Running as unit: NAME`, which `systemd-run` prints, makes endchat poll that unit and send a `[systemd]` message when it stops, which starts a turn. Watched units are kept in `units.txt` across restarts.
 
-A native turn is a new Claude Code session, which rebuilds everything ahead of endchat's history: system prompt, tools, and the context it puts first in the message (CLAUDE.md, the memory index, git status). When any of that differs from the previous turn, the turn writes its whole history to the prompt cache again; `contrib/turn_cache.py` shows which turns did and why. `turn.claude_settings` gives every turn the same Claude Code settings through `aop --claude-settings`, which can hold such parts still, for example turning off a built-in plugin that a remote flag switches on per session.
+A native turn is a new Claude Code session, which rebuilds everything ahead of endchat's history: system prompt, tools, and the context it puts first in the message (CLAUDE.md, the memory index, git status). When any of that differs from the previous turn, the turn writes its whole history to the prompt cache again; `contrib/turn_cache.py` shows which turns did and why. `turn.claude_settings` gives every turn the same Claude Code settings through `aop --claude-settings`, which can hold such parts still. Native Claude turns always get `cc-plugin-easel@builtin` turned off, merged into those settings unless they name it: Claude Code builds that plugin in and a remote flag switches it on per session, so its line in the system prompt otherwise comes and goes between turns.
 
 `endchat effort PROFILE LEVEL` sets the effort of the profile's turns from the next turn on, overriding `turn.effort` until changed; `--next` sets the next turn only, `--reset` returns to `turn.effort`, and with no level it prints the current setting. The setting is kept in `effort.json`. A turn at a different effort than the one before it misses the prompt cache, so each change costs one uncached prompt. Letting the model change its own effort (`turn.effort_control`) is unfinished and refused at load: it needs a rule for when a change is worth that cost.
 

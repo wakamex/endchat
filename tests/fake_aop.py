@@ -8,7 +8,7 @@ scenario file instead of calling a model. State lives in $FAKE_AOP_DIR.
 import fcntl, json, os, shutil, subprocess, sys, time
 
 D = os.environ["FAKE_AOP_DIR"]
-KNOWN_RUN = {"--agent", "--model", "--effort", "--profile", "--tools", "--system-prompt-file", "--prompt-file", "--prompt-parts", "--timeout", "--workdir"}
+KNOWN_RUN = {"--agent", "--model", "--effort", "--profile", "--tools", "--system-prompt-file", "--prompt-file", "--prompt-parts", "--timeout", "--workdir", "--claude-settings"}
 KNOWN_FLAGS = {"--no-web", "--json", "--native-state"}
 
 

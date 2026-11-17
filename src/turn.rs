@@ -235,8 +235,27 @@ fn run_args(engine: &Engine, prompt_file: PathBuf, parts: bool, label: u64, effo
         task: (t.profile != "sealed" && !t.native).then(|| format!("endchat-turn-{label}")),
         workdir: if t.native { t.workdir.clone() } else { None },
         native_state: t.native,
-        claude_settings: t.claude_settings.as_ref().map(|s| s.to_string()),
+        claude_settings: claude_settings(t),
     }
+}
+
+/// Built into Claude Code and switched on per session by a remote flag, so its line in the system
+/// prompt comes and goes between sessions, and a native turn whose line differs from the previous
+/// turn's writes its whole history to the prompt cache again.
+const FLAGGED_PLUGIN: &str = "cc-plugin-easel@builtin";
+
+/// The Claude Code settings for a turn: the profile's `claude_settings`, and for a native Claude turn
+/// the flagged plugin turned off unless the profile says otherwise.
+fn claude_settings(t: &crate::profile::Turn) -> Option<String> {
+    let mut s = t.claude_settings.clone();
+    if t.native && t.agent == "claude" {
+        let obj = s.get_or_insert_with(|| serde_json::json!({}));
+        let plugins = obj.as_object_mut().expect("checked at load").entry("enabledPlugins").or_insert_with(|| serde_json::json!({}));
+        if let Some(p) = plugins.as_object_mut() {
+            p.entry(FLAGGED_PLUGIN).or_insert(serde_json::Value::Bool(false));
+        }
+    }
+    s.map(|s| s.to_string())
 }
 
 fn turn_aop(engine: &Engine) -> crate::aop::Aop {
@@ -771,6 +790,7 @@ mod tests {
         let args: Vec<&str> = runs[1]["args"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
         assert!(!args.contains(&"--tools") && !args.contains(&"--system-prompt-file"), "{args:?}");
         assert!(args.contains(&"--native-state") && args.contains(&d.path().join("work").to_str().unwrap()));
+        assert!(args.windows(2).any(|w| w == ["--claude-settings", r#"{"enabledPlugins":{"cc-plugin-easel@builtin":false}}"#]), "{args:?}");
     }
 
     fn raw_engine(fake: &FakeAop, dir: &std::path::Path) -> Arc<Engine> {
@@ -839,6 +859,16 @@ mod tests {
             collect(rx).await;
         }
         assert_eq!(texts(&e), ["one", "Bash {\"command\":\"ls\"}", "a.txt", "First.", "two", "Bash {\"command\":\"pwd\"}", "/w", "Second."]);
+    }
+
+    #[test]
+    fn a_native_claude_turn_turns_the_flagged_plugin_off_unless_the_profile_says_otherwise() {
+        let mut t = crate::profile::Turn::default();
+        assert_eq!(claude_settings(&t), None, "a sealed turn sets its own system prompt");
+        t.native = true;
+        assert_eq!(claude_settings(&t).unwrap(), r#"{"enabledPlugins":{"cc-plugin-easel@builtin":false}}"#);
+        t.claude_settings = Some(json!({"includeGitInstructions": false, "enabledPlugins": {"cc-plugin-easel@builtin": true}}));
+        assert_eq!(claude_settings(&t).unwrap(), r#"{"enabledPlugins":{"cc-plugin-easel@builtin":true},"includeGitInstructions":false}"#);
     }
 
     #[tokio::test]
