@@ -29,7 +29,12 @@ message's position in characters from the start of the session.
   stub of the result holding it), summarized (behind a compaction or cut, but named in its
   summary), or gone. A decision that used a token the harness no longer showed had to recover it,
   which is the clearest case of what forgetting costs. endchat's cuts are rebuilt from its rules and
-  the profile's limits, since only the last cut is kept, so its summaries are not checked.
+  the profile's limits, since only the last cut is kept, and its summaries are read from the cut
+  calls' AOP run records, each in effect from when it was written.
+- A token not shown is traced to where it came back from: a tool result earlier in the turn
+  (reread), the summary the harness showed, the instruction and memory files the harness loads
+  (trials.json `instructions`, read as they are now, not as they were), or none found. Rereads are
+  recall the agent paid for; none found may be a coincidence or something this cannot see.
 
 Decision turns are split by reach-back (near under 50,000 characters, mid to 400,000, far beyond)
 and up to --per-bucket are drawn from each trial and bucket with a seeded generator, so the same
@@ -154,6 +159,31 @@ def endchat_shown(m, old, stub):
     return m["text"]
 
 
+CUT_PROMPT = "The chat below, between <chat> and </chat>, is the oldest part of an ongoing chat"
+
+
+def cut_summaries(profile):
+    """(created_at, summary) of each of endchat's cut summaries, from the cut calls' AOP run records."""
+    import glob
+    out = []
+    for d in glob.glob(os.path.join(os.path.expanduser(profile), ".aop", "runs", "*")):
+        try:
+            req = json.load(open(os.path.join(d, "request.json")))
+            res = json.load(open(os.path.join(d, "result.json")))
+        except (OSError, ValueError):
+            continue
+        reply = res.get("final_message") or ""
+        if (req.get("prompt") or "").startswith(CUT_PROMPT) and "<summary>" in reply:
+            out.append((req.get("created_at", ""), reply.split("<summary>", 1)[1].split("</summary>", 1)[0]))
+    return sorted(out)
+
+
+def loaded_text(trial):
+    """The instruction and memory files the harness loads, as they are now (trials.json `instructions`, globs)."""
+    import glob
+    return "\n".join(open(f, errors="replace").read() for g in trial.get("instructions", []) for f in sorted(glob.glob(os.path.expanduser(g))) if os.path.isfile(f))
+
+
 def windows(msgs, starts, trial):
     """Per turn start: (first message the harness still showed, the text it showed of the history, its
     summary of what came before). Claude Code shows everything since its last compaction and that
@@ -173,6 +203,7 @@ def windows(msgs, starts, trial):
             out[s] = (start, None, summary)
         return out
     high, low, stub = endchat_limits(trial["endchat_profile"])
+    summaries = cut_summaries(trial["endchat_profile"])
     cut = 0
     for j, s in enumerate(starts):
         prev = starts[j - 1] if j else 0
@@ -190,7 +221,8 @@ def windows(msgs, starts, trial):
             if at is not None:
                 cut = at
         shown = "\n".join(endchat_shown(msgs[k], k < prev, stub) for k in range(cut, s))
-        out[s] = (cut, shown, None)
+        summary = next((text for at, text in reversed(summaries) if at[:19] <= msgs[s]["date"][:19]), "") if cut else ""
+        out[s] = (cut, shown, summary)
     return out
 
 
@@ -206,6 +238,16 @@ def visibility(token, s, msgs, window):
     return "summarized" if summary and token in summary else "gone"
 
 
+def source(token, s, use, msgs, window, loaded):
+    """Where a token the harness no longer showed came back from: a tool result earlier in the turn
+    (reread), the summary the harness showed, the loaded instruction and memory files, or nowhere found."""
+    if any(token in m["text"] for m in msgs[s + 1:use] if m["kind"] == "echo"):
+        return "reread"
+    if window[2] and token in window[2]:
+        return "summary"
+    return "instructions" if token in loaded else "none"
+
+
 def turns(trial, generic):
     stream = claude_stream(trial["claude_session"]) if "claude_session" in trial else endchat_stream(trial["endchat_profile"])
     msgs, pos = [], 0
@@ -216,6 +258,7 @@ def turns(trial, generic):
     last = {}  # token -> position of its latest appearance so far
     starts = [k for k, m in enumerate(msgs) if m["kind"] == "user"]
     seen_windows = windows(msgs, starts, trial)
+    loaded = loaded_text(trial)
     out = []
     for j, s in enumerate(starts):
         end = starts[j + 1] if j + 1 < len(starts) else len(msgs)
@@ -228,10 +271,12 @@ def turns(trial, generic):
         if not (trial["from"] <= trig["date"][:16] < trial["to"]):
             continue
         calls, decision = 0, None
-        used = set()
+        used, first_use = set(), {}
         for k in range(s + 1, end):
             m = msgs[k]
             if m["kind"] in ("tool", "agent"):
+                for tok in tokens(m["text"]):
+                    first_use.setdefault(tok, k)
                 used |= tokens(m["text"])
             if m["kind"] != "tool":
                 continue
@@ -244,6 +289,7 @@ def turns(trial, generic):
         reach = [(trig["pos"] - before[t], t) for t in used - own if t in before and count[t] <= COMMON and t not in generic]
         far = max(reach, default=(0, None))
         vis = {tok: visibility(tok, s, msgs, seen_windows[s]) for _, tok in reach}
+        came_from = {tok: source(tok, s, first_use[tok], msgs, seen_windows[s], loaded) for tok, v in vis.items() if v != "shown"}
         turn = {
             "trial": trial["name"],
             "index": s,
@@ -257,7 +303,7 @@ def turns(trial, generic):
             "reach_back_token": far[1],
             "reach_back_visibility": vis.get(far[1]),
             "old_tokens": len(reach),
-            "old_tokens_not_shown": sorted(tok for tok, v in vis.items() if v != "shown"),
+            "old_tokens_not_shown": {tok: {"visibility": vis[tok], "came_from": came_from[tok]} for tok in sorted(came_from)},
             "history_chars": trig["pos"],
             "turn_messages": end - s,
         }
@@ -300,7 +346,8 @@ def main():
             drawn += sorted(pick, key=lambda t: t["index"])
         print(f"{trial['name']}: {len(ts)} turns in the window, {len(decisions)} decision turns: " + ", ".join(f"{n} {sum(bucket(t['reach_back_chars']) == n for t in decisions)}" for n, _ in BUCKETS)
               + "; reach-back token " + ", ".join(f"{v} {n}" for v, n in sorted(Counter(t['reach_back_visibility'] for t in decisions if t['reach_back_token']).items()))
-              + f"; {sum(1 for t in decisions if t['old_tokens_not_shown'])} used something not shown")
+              + f"; {sum(1 for t in decisions if t['old_tokens_not_shown'])} used something not shown; its sources "
+              + ", ".join(f"{k} {n}" for k, n in sorted(Counter(v["came_from"] for t in decisions for v in t["old_tokens_not_shown"].values()).items())))
     json.dump({"seed": a.seed, "max_calls": a.max_calls, "trials": trials, "decision_turns": all_turns, "drawn": [(t["trial"], t["index"]) for t in drawn]}, open(os.path.join(a.out, "turns.json"), "w"), indent=1)
     with open(os.path.join(a.out, "selection.md"), "w") as f:
         f.write(f"# Drawn decision turns (seed {a.seed})\n\n")
@@ -310,7 +357,7 @@ def main():
             f.write(f"- Decision ({t['decision_kind']}) after {t['calls_before_decision']} calls: {t['decision'][:300]!r}\n")
             f.write(f"- Reach-back: {t['reach_back_chars']:,} characters, token `{t['reach_back_token']}`, {t['reach_back_visibility']} when the turn began\n")
             if t["old_tokens_not_shown"]:
-                f.write(f"- Used but not shown when the turn began: {', '.join('`' + x + '`' for x in t['old_tokens_not_shown'][:8])}\n")
+                f.write("- Used but not shown when the turn began: " + ", ".join(f"`{x}` ({v['visibility']}, from {v['came_from']})" for x, v in list(t["old_tokens_not_shown"].items())[:8]) + "\n")
             f.write(f"- Outcome: {t.get('outcome', 'none recorded')}\n\n")
     print(f"drew {len(drawn)} turns; wrote {a.out}/turns.json and selection.md")
 
