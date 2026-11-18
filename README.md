@@ -69,6 +69,7 @@ native = false       # run turns as plain Claude Code in workdir: its own system
 watch_units = false  # tell the chat when a systemd unit its tools started stops
 stub_sessions = false   # with native: stub the history in each turn's Claude Code session files when it ends
 # claude_settings = { includeGitInstructions = false }   # Claude Code settings for every turn (aop --claude-settings)
+# task = "lane-ahc047"   # with a worktree profile such as edit: every turn runs in this one AOP task
 
 [turn.commands]      # extra text tools: a reply line `name(ARG)` or `name ARG` runs `program PROFILE_DIR ARG`
 # search = "/path/to/search_tool"

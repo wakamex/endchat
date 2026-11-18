@@ -97,6 +97,10 @@ pub struct Turn {
     /// flag switches on, makes the turn write its whole history to the prompt cache again; settings
     /// here can hold such parts still.
     pub claude_settings: Option<serde_json::Value>,
+    /// With a profile that makes a task worktree (not `sealed`, not `native`): the AOP task every
+    /// turn runs in, so all turns work in one worktree, such as a benchmark lane's. Without it each
+    /// turn is its own task.
+    pub task: Option<String>,
 }
 
 impl Default for Turn {
@@ -124,6 +128,7 @@ impl Default for Turn {
             stub_sessions: false,
             effort_control: false,
             claude_settings: None,
+            task: None,
         }
     }
 }

@@ -232,7 +232,7 @@ fn run_args(engine: &Engine, prompt_file: PathBuf, parts: bool, label: u64, effo
         prompt_file,
         parts,
         timeout: t.timeout,
-        task: (t.profile != "sealed" && !t.native).then(|| format!("endchat-turn-{label}")),
+        task: (t.profile != "sealed" && !t.native).then(|| t.task.clone().unwrap_or_else(|| format!("endchat-turn-{label}"))),
         workdir: if t.native { t.workdir.clone() } else { None },
         native_state: t.native,
         claude_settings: claude_settings(t),
@@ -859,6 +859,20 @@ mod tests {
             collect(rx).await;
         }
         assert_eq!(texts(&e), ["one", "Bash {\"command\":\"ls\"}", "a.txt", "First.", "two", "Bash {\"command\":\"pwd\"}", "/w", "Second."]);
+    }
+
+    #[test]
+    fn a_profile_task_puts_every_turn_in_one_aop_task() {
+        let fake = FakeAop::new(json!({}));
+        let d = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.aop_bin = fake.aop().bin;
+        cfg.turn.profile = "edit".into();
+        let e = Engine::open(d.path(), cfg.clone()).unwrap();
+        assert_eq!(run_args(&e, "/p".into(), false, 7, "medium").task.as_deref(), Some("endchat-turn-7"));
+        cfg.turn.task = Some("lane-ahc047".into());
+        let e = Engine::open(tempfile::tempdir().unwrap().path(), cfg).unwrap();
+        assert_eq!(run_args(&e, "/p".into(), false, 7, "medium").task.as_deref(), Some("lane-ahc047"));
     }
 
     #[test]
