@@ -20,9 +20,16 @@ message's position in characters from the start of the session.
   work already chosen, so they are left out.
 - Its reach-back is how far before the turn, in characters, the agent last saw the oldest
   distinctive token (a path, an identifier, a hash, a long number) that it uses on the way to the
-  decision. Tokens in the turn's own message, and tokens common across the session, are left out.
+  decision. Tokens in the turn's own message, tokens common across the session, and generic tokens
+  are left out; a token is generic when the recent sessions of three or more other projects mention
+  it (--background holds those counts, built once and reused).
   A far reach-back is a decision that depends on old history, which is what a smaller history risks.
 - A decision that starts a job takes the job's later notice as its outcome.
+- Each old token gets its visibility when the turn began: shown, stubbed (endchat showed only a
+  stub of the result holding it), summarized (behind a compaction or cut, but named in its
+  summary), or gone. A decision that used a token the harness no longer showed had to recover it,
+  which is the clearest case of what forgetting costs. endchat's cuts are rebuilt from its rules and
+  the profile's limits, since only the last cut is kept, so its summaries are not checked.
 
 Decision turns are split by reach-back (near under 50,000 characters, mid to 400,000, far beyond)
 and up to --per-bucket are drawn from each trial and bucket with a seeded generator, so the same
@@ -55,6 +62,34 @@ def tokens(text):
     return {t for t in TOKEN.findall(text) if len(t) >= 5 and not NOISE.match(t)}
 
 
+GENERIC_PROJECTS = 3  # a token seen in this many other projects is generic: uint8_t, s.index, /usr/bin/time
+
+
+def background(path, exclude, files_per_project=3, read=2_000_000):
+    """Per token, the number of other projects whose recent Claude Code sessions mention it. Cached at
+    `path`, since the sessions change: the cache, not the live history, makes a selection repeatable."""
+    if os.path.exists(path):
+        return json.load(open(path))["projects"]
+    import glob
+    seen = Counter()
+    projects = []
+    for proj in sorted(glob.glob(os.path.expanduser("~/.claude/projects/*/"))):
+        if any(x in proj for x in exclude):
+            continue
+        files = sorted(glob.glob(proj + "*.jsonl"), key=os.path.getmtime)[-files_per_project:]
+        if not files:
+            continue
+        found = set()
+        for f in files:
+            with open(f, errors="replace") as fh:
+                found |= tokens(fh.read(read))
+        seen.update(found)
+        projects.append(os.path.basename(proj.rstrip("/")))
+    counts = {t: n for t, n in seen.items() if n >= GENERIC_PROJECTS}
+    json.dump({"projects_read": projects, "files_per_project": files_per_project, "bytes_per_file": read, "projects": counts}, open(path, "w"))
+    return counts
+
+
 def claude_stream(path):
     """(kind, text, date) from a Claude Code session file, without side chains or meta messages."""
     for line in open(os.path.expanduser(path)):
@@ -64,6 +99,12 @@ def claude_stream(path):
         m = r.get("message") or {}
         c = m.get("content")
         date = r.get("timestamp", "")
+        if r.get("type") == "system" and r.get("subtype") == "compact_boundary":
+            yield "boundary", "", date
+            continue
+        if r.get("isCompactSummary"):
+            yield "summary", c if isinstance(c, str) else " ".join(b.get("text", "") for b in c or [] if isinstance(b, dict)), date
+            continue
         if r.get("type") == "user":
             if isinstance(c, str):
                 if not c.startswith(("<local-command", "<command-name>")):
@@ -93,7 +134,79 @@ def endchat_stream(profile):
             yield kind, m["text"], m["date"]
 
 
-def turns(trial):
+def endchat_limits(profile):
+    """raw_high, raw_low and stub_chars from a profile's config, with endchat's defaults."""
+    import tomllib
+    try:
+        cfg = tomllib.load(open(os.path.join(os.path.expanduser(profile), "config.toml"), "rb"))
+    except OSError:
+        cfg = {}
+    lim, turn = cfg.get("limits", {}), cfg.get("turn", {})
+    return lim.get("raw_high", 640_000), lim.get("raw_low", 160_000), turn.get("stub_chars", 1000)
+
+
+def endchat_shown(m, old, stub):
+    """What endchat's raw history shows of a message: a long old result is a stub, a long old call its start."""
+    if old and m["kind"] == "echo" and len(m["text"]) > stub:
+        return ""
+    if old and m["kind"] == "tool" and len(m["text"]) > max(stub, 200):
+        return m["text"][:200]
+    return m["text"]
+
+
+def windows(msgs, starts, trial):
+    """Per turn start: (first message the harness still showed, the text it showed of the history, its
+    summary of what came before). Claude Code shows everything since its last compaction and that
+    compaction's summary. endchat's cuts are rebuilt with its rules, since only the last one is kept:
+    when the shown history passes raw_high bytes, the oldest turns go until at most raw_low remain,
+    never into the previous turn; results older than the previous turn are stubs."""
+    out = {}
+    if "claude_session" in trial:
+        start, summary = 0, ""
+        bounds = iter([k for k, m in enumerate(msgs) if m["kind"] == "boundary"])
+        nxt = next(bounds, None)
+        for s in starts:
+            while nxt is not None and nxt < s:
+                start = nxt + 1
+                summary = next((m["text"] for m in reversed(msgs[:nxt]) if m["kind"] == "summary"), "")
+                nxt = next(bounds, None)
+            out[s] = (start, None, summary)
+        return out
+    high, low, stub = endchat_limits(trial["endchat_profile"])
+    cut = 0
+    for j, s in enumerate(starts):
+        prev = starts[j - 1] if j else 0
+        size = lambda k: len(f"{k}|{msgs[k]['kind']}: ") + len(endchat_shown(msgs[k], k < prev, stub).encode()) + 1
+        sizes = {k: size(k) for k in range(cut, s)}
+        total = sum(sizes.values())
+        if total > high:
+            left, at = total, None
+            for k in range(cut, prev):
+                left -= sizes[k]
+                if msgs[k + 1]["kind"] == "user":
+                    at = k + 1
+                    if left <= low:
+                        break
+            if at is not None:
+                cut = at
+        shown = "\n".join(endchat_shown(msgs[k], k < prev, stub) for k in range(cut, s))
+        out[s] = (cut, shown, None)
+    return out
+
+
+def visibility(token, s, msgs, window):
+    """Whether the harness showed `token` when turn `s` began: shown, stubbed (endchat: only inside a
+    stubbed result), summarized (behind a compaction or cut, but named in its summary), or gone."""
+    start, shown, summary = window
+    in_window = any(token in m["text"] for m in msgs[start:s] if m["kind"] not in ("boundary", "summary"))
+    if in_window and (shown is None or token in shown):
+        return "shown"
+    if in_window:
+        return "stubbed"
+    return "summarized" if summary and token in summary else "gone"
+
+
+def turns(trial, generic):
     stream = claude_stream(trial["claude_session"]) if "claude_session" in trial else endchat_stream(trial["endchat_profile"])
     msgs, pos = [], 0
     for kind, text, date in stream:
@@ -102,6 +215,7 @@ def turns(trial):
     count = Counter(t for m in msgs for t in tokens(m["text"]))
     last = {}  # token -> position of its latest appearance so far
     starts = [k for k, m in enumerate(msgs) if m["kind"] == "user"]
+    seen_windows = windows(msgs, starts, trial)
     out = []
     for j, s in enumerate(starts):
         end = starts[j + 1] if j + 1 < len(starts) else len(msgs)
@@ -127,8 +241,9 @@ def turns(trial):
                 break
             calls += 1
         own = tokens(trig["text"])
-        reach = [(trig["pos"] - before[t], t) for t in used - own if t in before and count[t] <= COMMON]
+        reach = [(trig["pos"] - before[t], t) for t in used - own if t in before and count[t] <= COMMON and t not in generic]
         far = max(reach, default=(0, None))
+        vis = {tok: visibility(tok, s, msgs, seen_windows[s]) for _, tok in reach}
         turn = {
             "trial": trial["name"],
             "index": s,
@@ -140,6 +255,9 @@ def turns(trial):
             "decision_kind": None if decision is None else "edit" if msgs[decision]["text"].split(" ", 1)[0] in CHANGING_TOOLS else next((n for n, r in KINDS if r.search(msgs[decision]["text"])), "other"),
             "reach_back_chars": far[0],
             "reach_back_token": far[1],
+            "reach_back_visibility": vis.get(far[1]),
+            "old_tokens": len(reach),
+            "old_tokens_not_shown": sorted(tok for tok, v in vis.items() if v != "shown"),
             "history_chars": trig["pos"],
             "turn_messages": end - s,
         }
@@ -165,19 +283,24 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--max-calls", type=int, default=6)
     ap.add_argument("--per-bucket", type=int, default=4)
+    ap.add_argument("--background", help="cache of token counts in other projects (default OUT/../background.json); built on first use")
+    ap.add_argument("--exclude", action="append", default=[], help="project name text to leave out of the background, such as the trials' own project")
     a = ap.parse_args()
     trials = json.load(open(a.trials))
     os.makedirs(a.out, exist_ok=True)
+    generic = background(a.background or os.path.join(os.path.dirname(os.path.abspath(a.out)), "background.json"), a.exclude or ["w3sim"])
     all_turns, drawn = [], []
     for trial in trials:
-        ts = turns(trial)
+        ts = turns(trial, generic)
         decisions = [t for t in ts if t["decision"] and t["calls_before_decision"] <= a.max_calls and t["decision_kind"] in CHOOSING]
         all_turns += decisions
         for name, _ in BUCKETS:
             pool = sorted((t for t in decisions if bucket(t["reach_back_chars"]) == name), key=lambda t: t["index"])
             pick = random.Random(f"{a.seed}:{trial['name']}:{name}").sample(pool, min(a.per_bucket, len(pool)))
             drawn += sorted(pick, key=lambda t: t["index"])
-        print(f"{trial['name']}: {len(ts)} turns in the window, {len(decisions)} decision turns: " + ", ".join(f"{n} {sum(bucket(t['reach_back_chars']) == n for t in decisions)}" for n, _ in BUCKETS))
+        print(f"{trial['name']}: {len(ts)} turns in the window, {len(decisions)} decision turns: " + ", ".join(f"{n} {sum(bucket(t['reach_back_chars']) == n for t in decisions)}" for n, _ in BUCKETS)
+              + "; reach-back token " + ", ".join(f"{v} {n}" for v, n in sorted(Counter(t['reach_back_visibility'] for t in decisions if t['reach_back_token']).items()))
+              + f"; {sum(1 for t in decisions if t['old_tokens_not_shown'])} used something not shown")
     json.dump({"seed": a.seed, "max_calls": a.max_calls, "trials": trials, "decision_turns": all_turns, "drawn": [(t["trial"], t["index"]) for t in drawn]}, open(os.path.join(a.out, "turns.json"), "w"), indent=1)
     with open(os.path.join(a.out, "selection.md"), "w") as f:
         f.write(f"# Drawn decision turns (seed {a.seed})\n\n")
@@ -185,7 +308,9 @@ def main():
             f.write(f"## {t['trial']} turn at {t['index']}, {t['date'][:16]}, {bucket(t['reach_back_chars'])} reach-back\n\n")
             f.write(f"- Trigger ({t['trigger']}): {t['trigger_text'][:300]!r}\n")
             f.write(f"- Decision ({t['decision_kind']}) after {t['calls_before_decision']} calls: {t['decision'][:300]!r}\n")
-            f.write(f"- Reach-back: {t['reach_back_chars']:,} characters, token `{t['reach_back_token']}`\n")
+            f.write(f"- Reach-back: {t['reach_back_chars']:,} characters, token `{t['reach_back_token']}`, {t['reach_back_visibility']} when the turn began\n")
+            if t["old_tokens_not_shown"]:
+                f.write(f"- Used but not shown when the turn began: {', '.join('`' + x + '`' for x in t['old_tokens_not_shown'][:8])}\n")
             f.write(f"- Outcome: {t.get('outcome', 'none recorded')}\n\n")
     print(f"drew {len(drawn)} turns; wrote {a.out}/turns.json and selection.md")
 
