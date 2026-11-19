@@ -1,15 +1,17 @@
 //! The raw-history prompt: the chat so far word for word instead of the view of summaries.
 //!
-//! Tool results longer than `stub_chars` are replaced by a one-line stub once they are older than
-//! the previous turn, and tool calls that long, such as a command that writes a whole script, are
-//! cut to their start. When the raw part passes `high` bytes, its oldest turns are cut off until
-//! under `low` bytes remain, and one call summarizes what was cut, together with the summary of
-//! any earlier cut. The cut and that summary are kept in `raw.json`, so every turn until the next
-//! cut sends the same prefix.
+//! Tool results longer than `stub_chars` are replaced by a one-line stub as soon as their turn
+//! enters the history, and tool calls that long, such as a command that writes a whole script, are
+//! cut to their start. Because each turn enters the prompt in its final form and never changes
+//! again, it is written to the prompt cache once as history rather than in full and again with
+//! stubs. When the raw part passes `high` bytes, its oldest turns are cut off until under `low`
+//! bytes remain, and one call summarizes what was cut, together with the summary of any earlier
+//! cut. The cut and that summary are kept in `raw.json`, so every turn until the next cut sends
+//! the same prefix.
 //!
-//! Each turn is one cache block, and the mark sits on the last block before the previous turn: that
-//! part never changes again, while the previous turn's results are stubbed on the next turn. The
-//! next prompt is one block longer, so its lookback finds this mark.
+//! Each turn is one cache block, and the mark sits on the last block of the history (the previous
+//! turn, or the intro block when the history is empty). The next prompt repeats every block up to
+//! that mark byte for byte and adds one block, so its lookback finds this mark.
 
 use crate::error::Result;
 use crate::log::{Kind, Message};
@@ -37,20 +39,20 @@ struct Saved {
 /// Written so the model takes the `agent` entries as its own replies and keeps to their rules and
 /// length: on replayed turns of a real chat this answered as often and as long as sending the same
 /// history as real conversation turns, and shorter and less often than a neutral description.
-const INTRO: &str = "<chat>\nThis is the conversation you have been taking part in, oldest first, one message per entry as `id|kind: text`. `agent` entries are your own earlier replies, exactly as you sent them; `tool` and `echo` entries are your tool calls and their results; `user` entries are the messages you received; `work` and `note` entries are reports and notes. A large tool result older than the previous turn is replaced by a stub: run the call again if you need it. The message after </chat> is the next one you received. Your final response is your next `agent` entry: follow the same instructions and rules your earlier replies followed, and match their length and style.\n";
+const INTRO: &str = "<chat>\nThis is the conversation you have been taking part in, oldest first, one message per entry as `id|kind: text`. `agent` entries are your own earlier replies, exactly as you sent them; `tool` and `echo` entries are your tool calls and their results; `user` entries are the messages you received; `work` and `note` entries are reports and notes. A large tool result is replaced by a stub: run the call again if you need it. The message after </chat> is the next one you received. Your final response is your next `agent` entry: follow the same instructions and rules your earlier replies followed, and match their length and style.\n";
 
-/// Characters an old long tool call keeps: enough to name the tool and show what it ran.
+/// Characters a long tool call keeps in history: enough to name the tool and show what it ran.
 const CALL_HEAD: usize = 200;
 
-/// The message as one transcript entry, with a stub in place of a long old result and only the
-/// start of a long old call.
-fn entry(m: &Message, call: Option<&Message>, stub: bool, lim: &Limits) -> String {
+/// The message as one transcript entry, with a stub in place of a long result and only the start
+/// of a long call.
+fn entry(m: &Message, call: Option<&Message>, lim: &Limits) -> String {
     let chars = m.text.chars().count();
-    if stub && m.kind == Kind::Tool && chars > lim.stub_chars.max(CALL_HEAD) {
+    if m.kind == Kind::Tool && chars > lim.stub_chars.max(CALL_HEAD) {
         let head: String = m.text.chars().take(CALL_HEAD).collect();
         return format!("{}|tool: {head} [... {chars} characters in all]\n", m.i);
     }
-    if stub && m.kind == Kind::Echo && chars > lim.stub_chars {
+    if m.kind == Kind::Echo && chars > lim.stub_chars {
         return match call {
             Some(c) => format!("{}|echo: [stub: {chars} characters returned by {} in message {}]\n", m.i, c.text.split_whitespace().next().unwrap_or("the call"), c.i),
             None => format!("{}|echo: [stub: {chars} characters returned by an earlier call]\n", m.i),
@@ -114,7 +116,7 @@ fn history(mem: &mut Memory, from: u64, end: u64, lim: &Limits) -> Result<Histor
     let turns: Vec<usize> = (0..msgs.len()).filter(|&k| msgs[k].kind == Kind::User && msgs[k].run.is_none()).collect();
     let prev = turns.last().copied().unwrap_or(0);
     let calls = calls(&msgs);
-    let entries = (0..msgs.len()).map(|k| entry(&msgs[k], calls[k].map(|c| &msgs[c]), k < prev, lim)).collect();
+    let entries = (0..msgs.len()).map(|k| entry(&msgs[k], calls[k].map(|c| &msgs[c]), lim)).collect();
     Ok(History { msgs, entries, turns, prev })
 }
 
@@ -170,16 +172,19 @@ pub fn prompt_to(mem: &mut Memory, lim: &Limits, tail: &str, end: u64) -> Result
         head += &format!("The chat {before} is summarized here; the messages themselves are kept in full in the log.\n<summary>\n{}\n</summary>\n", s.summary);
     }
     let mut parts = vec![(head, false)];
-    let mut bounds = h.turns.clone();
-    if bounds.first() != Some(&0) {
-        bounds.insert(0, 0);
-    }
-    for w in bounds.windows(2) {
-        parts.push((h.entries[w[0]..w[1]].concat(), false));
+    if !h.entries.is_empty() {
+        let mut bounds = h.turns.clone();
+        if bounds.first() != Some(&0) {
+            bounds.insert(0, 0);
+        }
+        bounds.push(h.entries.len());
+        for w in bounds.windows(2) {
+            parts.push((h.entries[w[0]..w[1]].concat(), false));
+        }
     }
     let last = parts.len() - 1;
     parts[last].1 = true;
-    parts.push((h.entries[h.prev..].concat() + "</chat>\n" + tail, false));
+    parts.push((format!("</chat>\n{tail}"), false));
     parts.retain(|(t, _)| !t.is_empty());
     Ok(Prompt(parts))
 }
@@ -203,9 +208,12 @@ mod tests {
     }
 
     #[test]
-    fn old_results_are_stubbed_and_the_mark_ends_before_the_previous_turn() {
+    fn long_results_are_stubbed_at_once_and_the_mark_ends_the_history() {
         let d = tempfile::tempdir().unwrap();
         let mut m = mem(d.path());
+        let empty = prompt(&mut m, &LIM, "first").unwrap();
+        assert_eq!(empty.0.len(), 2);
+        assert!(empty.0[0].1 && !empty.0[1].1 && empty.0[1].0 == "</chat>\nfirst");
         turn(&mut m, "first", &"a".repeat(60));
         turn(&mut m, "second", &"b".repeat(60));
         turn(&mut m, "third", &"c".repeat(60));
@@ -213,12 +221,14 @@ mod tests {
         let text = p.text();
         assert!(text.contains("2|echo: [stub: 60 characters returned by Bash in message 1]"), "{text}");
         assert!(text.contains("6|echo: [stub: 60 characters"));
-        assert!(text.ends_with(&format!("10|echo: {}\n11|agent: done\n</chat>\nnext", "c".repeat(60))), "the previous turn keeps its results");
+        assert!(text.ends_with("10|echo: [stub: 60 characters returned by Bash in message 9]\n11|agent: done\n</chat>\nnext"), "the previous turn is already stubbed: {text}");
+        assert!(!text.contains(&"c".repeat(60)));
         assert!(!text.contains("<summary>"));
         let marked: Vec<usize> = (0..p.0.len()).filter(|&k| p.0[k].1).collect();
         assert_eq!(marked.len(), 1);
-        assert!(p.0[marked[0]].0.starts_with("4|user: second"), "{:?}", p.0);
-        assert!(p.0[marked[0] + 1].0.starts_with("8|user: third"));
+        assert!(p.0[marked[0]].0.starts_with("8|user: third"), "{:?}", p.0);
+        assert_eq!(p.0[marked[0] + 1].0, "</chat>\nnext");
+        assert_eq!(p.0[0].0, empty.0[0].0);
     }
 
     #[test]
@@ -228,9 +238,10 @@ mod tests {
         turn(&mut m, "first", &"a".repeat(60));
         turn(&mut m, "second", &"b".repeat(60));
         let before = prompt(&mut m, &LIM, "x").unwrap();
-        turn(&mut m, "third", "short");
+        turn(&mut m, "third", &"c".repeat(60));
         let after = prompt(&mut m, &LIM, "y").unwrap();
         let mark = before.0.iter().position(|(_, c)| *c).unwrap();
+        assert!(before.0[mark].0.starts_with("4|user: second"), "{:?}", before.0);
         assert_eq!(before.0[..=mark].iter().map(|(t, _)| t).collect::<Vec<_>>(), after.0[..=mark].iter().map(|(t, _)| t).collect::<Vec<_>>());
         assert_eq!(after.0.iter().position(|(_, c)| *c), Some(mark + 1));
     }
@@ -298,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn a_long_old_call_keeps_only_its_start() {
+    fn a_long_call_keeps_only_its_start() {
         let d = tempfile::tempdir().unwrap();
         let mut m = mem(d.path());
         let script = format!("Bash {{\"command\":\"cat > plot.py <<'E'\\n{}\"}}", "x = 1\\n".repeat(100));
@@ -311,8 +322,18 @@ mod tests {
         let text = prompt(&mut m, &lim, "t").unwrap().text();
         let head: String = script.chars().take(200).collect();
         let stub = format!("|tool: {head} [... {} characters in all]\n", script.chars().count());
-        assert!(text.contains(&format!("1{stub}")) && text.contains(&format!("4{stub}")), "{text}");
-        assert!(text.contains(&format!("7|tool: {script}\n")), "the previous turn keeps its call whole");
+        assert!(text.contains(&format!("1{stub}")) && text.contains(&format!("4{stub}")) && text.contains(&format!("7{stub}")), "{text}");
+        assert!(!text.contains(&script), "the previous turn's long call is stubbed at once");
+    }
+
+    #[test]
+    fn due_cut_counts_the_stubbed_previous_turn() {
+        let d = tempfile::tempdir().unwrap();
+        let mut m = mem(d.path());
+        turn(&mut m, "first", &"a".repeat(2_000));
+        turn(&mut m, "second", &"b".repeat(2_000));
+        let lim = Limits { stub_chars: 50, high: 1_000, low: 500 };
+        assert!(due_cut(&mut m, &lim).unwrap().is_none(), "stubbed entries fit under high");
     }
 
     #[test]

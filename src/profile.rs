@@ -74,7 +74,7 @@ pub struct Turn {
     pub view: bool,
     /// Send the chat word for word instead of the view, cut to summary lines past `limits.raw_high`.
     pub raw: bool,
-    /// With `raw`: tool results longer than this are stubbed once they are older than the previous turn.
+    /// With `raw`: tool results longer than this are stubbed when their turn enters the history, and calls that long keep only their start.
     pub stub_chars: usize,
     /// Run turns as the harness runs on its own, in `workdir` (`aop --workdir --native-state`): its
     /// system prompt, CLAUDE.md, settings, memory, skills, default tools and session store. Needs
