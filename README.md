@@ -99,6 +99,32 @@ A native turn is a new Claude Code session, which rebuilds everything ahead of e
 
 `endchat effort PROFILE LEVEL` sets the effort of the profile's turns from the next turn on, overriding `turn.effort` until changed; `--next` sets the next turn only, `--reset` returns to `turn.effort`, and with no level it prints the current setting. The setting is kept in `effort.json`. A turn at a different effort than the one before it misses the prompt cache, so each change costs one uncached prompt. Letting the model change its own effort (`turn.effort_control`) is unfinished and refused at load: it needs a rule for when a change is worth that cost.
 
+## Context management compared with Claude Code
+
+This compares a native raw profile with one long Claude Code session doing the same work in the same directory. The Claude Code behavior is read from the source of version 2.1.330, and the measurements come from three 24-hour coding sessions, the trials below, run with Opus at medium effort.
+
+Old tool output: endchat replaces a tool result longer than `stub_chars` with a one-line stub when its turn ends, and the model runs the call again if it needs the result. In Claude Code a tool result stays in the conversation at the size it arrived until compaction. Its two mechanisms for clearing old tool results, one after about 65 minutes idle and one when the API sends a context hint, are both off by server flag, and local flag overrides are disabled. `bashOutputMaxChars` (default 30,000 characters, settable from 4,000 to 128,000) caps a Bash result as it arrives, saving the rest to a file; nothing shortens a result afterwards.
+
+Notes sent with each message: `tail_note` travels with the new message in its `<state>` block and is not kept in the history, so it costs its size once per turn and can change between turns. Claude Code's nearest equivalent, a `UserPromptSubmit` hook, adds its output to the conversation, where it is sent again with every later request until compaction. One 24-hour session with a short style reminder in such a hook held 129 copies of it, about 24,000 characters. A hook can add context but cannot remove or rewrite earlier messages; a `PostToolUse` hook can replace only the result being returned at that moment.
+
+History: endchat decides how much history stays word for word (`raw_high` and `raw_low`), what a cut summary keeps (`prompts/cut.md`) and which model writes it (`compactor.model`), and it adds its own notes, such as the one a failed turn leaves. Claude Code's compaction replaces the conversation with a summary, up to 5 recently read files (at most 5,000 tokens each and 50,000 in all), invoked skills (5,000 each, 25,000 in all), the plan, background task status, and a short tail of recent messages, 3 to 5 messages in the trials. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` sets when it fires, but any window it sets sends compaction through a path that stops trying for the rest of the session after three failures in a row, without saying so on screen or in the transcript.
+
+Cost: the trials are priced at 0.20 USD per million tokens read from the cache, 8 USD per million written to it with a one-hour lifetime, and 20 USD per million output tokens.
+
+| Trial | Setup | Mean context | USD per API call | Cache reads | Cache writes | Output |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4 | Claude Code, default compaction | 478K | 0.128 | 0.095 | 0.020 | 0.013 |
+| 6 | endchat, before raw prompts stubbed results on first entry | 200K | 0.108 | 0.039 | 0.049 | 0.020 |
+| 8 | Claude Code, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=333000` | 186K | 0.061 | 0.037 | 0.013 | 0.011 |
+
+The trials did different work: trial 6 started from later and harder problems than trial 4, and its tools returned 3.65 times as many characters. At similar mean context, trials 6 and 8 paid the same for cache reads. Trial 6 paid more for cache writes because each turn's work was written to the cache again in the next two turns' history, once in full and once stubbed. Raw prompts now stub on first entry, which no trial has run yet. It also paid almost twice as much for output per call, for a reason not yet checked. Replaying trial 6's 1,423 API calls with the change predicts that endchat costs about the same as a Claude Code session compacting at the same mean context, while keeping 28 to 34 turns word for word against Claude Code's 5 to 6. Whether that history improves the work has not been measured.
+
+What endchat's design costs:
+
+- Each turn is a new Claude Code session, so its state is rebuilt every turn, and any change ahead of the history, such as an edited CLAUDE.md or memory file, writes the whole history to the cache again. Only the first system prompt block is cached across sessions, so such a turn still reads about 4,000 to 6,000 tokens from the cache.
+- Nothing starts a turn between messages: a profile is idle until a message arrives, or a watched unit stops with `watch_units`.
+- A stubbed result has to be fetched again when the model needs it, which costs a tool call and the result's tokens.
+
 ## What is stored
 
 ```
